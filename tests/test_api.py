@@ -39,12 +39,18 @@ def test_index_and_frontend_assets(client) -> None:
     assert "STATUS_LABELS" in js.text
     assert "待命（未啟動）" in js.text
     assert "儲存設定" in page.text
+    assert "初次設定流程" in page.text
+    assert "搶夠自動停" in page.text
+    assert "複製做新 Apple ID" in js.text
+    assert "mountWorker" in js.text
     preview = Path("preview.html").read_text()
     assert 'href="static/css/app.css"' in preview
     assert 'src="static/js/app.js"' in preview
     assert "預覽模式" in preview
     assert "儲存設定" in preview
     assert "加入此 SKU" in js.text
+    assert "複製做新 Apple ID" in js.text
+    assert "初次設定流程" in preview
 
 
 def test_duplicate_session_dir_rejected(client) -> None:

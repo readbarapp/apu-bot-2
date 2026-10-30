@@ -19,6 +19,14 @@
       <div id="run-pill" class="pill idle">預覽 · 後台未啟動</div>
     </header>
 
+    <ol class="flow" aria-label="初次設定流程">
+      <li><strong>1. 設定 Worker</strong>揀機型、門市、數量，每個 Worker 用唔同 session 資料夾（一個資料夾 = 一個 Apple ID）。</li>
+      <li><strong>2. 儲存再啟動</strong>撳綠色「儲存設定」，再開測試模式「全域啟動」。系統先會開 Chromium。</li>
+      <li><strong>3. 登入 Apple ID</strong>喺彈出嘅嗰個 Worker 視窗登入。登入一次就會記住。登入完已經開始查庫存。</li>
+      <li><strong>4. 搶夠自動停</strong>達到購買上限就停搶，視窗會留住。換第二個 Apple ID 請新增 Worker 用新 session，唔使刪舊資料。</li>
+    </ol>
+    <div id="run-lock" class="run-lock" hidden>全域啟動進行中：畫面上嘅 Worker 設定已鎖定，改動唔會套用到正在跑嘅程式。要改設定請先緊急停止，儲存後再啟動。</div>
+
     <section class="global" aria-label="全域控制面板">
       <div class="global-copy">
         <h2>全域控制面板</h2>
@@ -50,7 +58,7 @@
           </div>
         </div>
         <p id="save-hint" class="save-hint dirty">尚未儲存。請先按「儲存設定」，再按全域啟動。</p>
-        <div id="worker-list"></div>
+        <div id="worker-list" class="worker-list"></div>
       </section>
 
       <section class="panel logs" aria-label="Live Logs">

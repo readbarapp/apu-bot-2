@@ -55,6 +55,8 @@
     logs: document.getElementById("log-stream"),
     pill: document.getElementById("run-pill"),
     clearLogs: document.getElementById("btn-clear-logs"),
+    runLock: document.getElementById("run-lock"),
+    workersPanel: document.querySelector(".workers"),
   };
 
   const state = {
@@ -187,7 +189,9 @@
     els.add.disabled = running;
     if (els.save) els.save.disabled = running;
     els.testMode.disabled = running;
-    els.list.querySelectorAll("input, select, button.add-sku, button.remove").forEach((node) => {
+    if (els.workersPanel) els.workersPanel.classList.toggle("is-running", running);
+    if (els.runLock) els.runLock.hidden = !running;
+    els.list.querySelectorAll("input, select, button.add-sku, button.remove, button.clone").forEach((node) => {
       node.disabled = running;
     });
     els.list.querySelectorAll("button.focus").forEach((node) => {
@@ -233,13 +237,12 @@
     )).join("");
   }
 
-  function renderWorkers() {
-    els.list.innerHTML = state.workers.map((worker) => {
-      const status = worker.status || "idle";
-      return `
-      <article class="worker-card" data-id="${esc(worker.id)}" data-status="${esc(status)}" data-message="${esc(worker.last_message || "")}" data-purchased="${esc(worker.purchased || 0)}">
+  function workerCardHtml(worker, entering) {
+    const status = worker.status || "idle";
+    return `
+      <article class="worker-card${entering ? " enter" : ""}" data-id="${esc(worker.id)}" data-status="${esc(status)}" data-message="${esc(worker.last_message || "")}" data-purchased="${esc(worker.purchased || 0)}">
         <div class="worker-top">
-          <strong>${esc(worker.name)}</strong>
+          <strong class="worker-title">${esc(worker.name)}</strong>
           <span class="badge ${esc(status)}">${esc(statusLabel(status))}${worker.purchased ? ` · ${worker.purchased}/${worker.max_qty}` : ""}</span>
         </div>
         <div class="grid">
@@ -276,13 +279,52 @@
         </div>
         <div class="card-actions">
           <button type="button" class="btn focus" ${state.running ? "" : "disabled"}>顯示此 Worker 視窗</button>
+          <button type="button" class="btn clone">複製做新 Apple ID</button>
           <button type="button" class="btn remove">刪除此 Worker</button>
         </div>
       </article>
     `;
-    }).join("");
+  }
+
+  function renderWorkers() {
+    els.list.innerHTML = state.workers.map((worker) => workerCardHtml(worker, false)).join("");
     setRunning(state.running, els.testMode.checked);
     updateSaveHint();
+  }
+
+  function mountWorker(worker) {
+    els.list.insertAdjacentHTML("beforeend", workerCardHtml(worker, true));
+    const card = els.list.querySelector(`[data-id="${worker.id}"]`);
+    if (card) {
+      card.addEventListener("animationend", () => card.classList.remove("enter"), { once: true });
+      card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+    setRunning(state.running, els.testMode.checked);
+    updateSaveHint();
+  }
+
+  function patchWorkerStatus(worker) {
+    const card = els.list.querySelector(`[data-id="${CSS.escape(worker.id)}"]`);
+    if (!card) return;
+    const status = worker.status || "idle";
+    card.dataset.status = status;
+    card.dataset.purchased = String(worker.purchased || 0);
+    const badge = card.querySelector(".badge");
+    if (badge) {
+      badge.className = `badge ${status}`;
+      badge.textContent = `${statusLabel(status)}${worker.purchased ? ` · ${worker.purchased}/${worker.max_qty}` : ""}`;
+    }
+    const title = card.querySelector(".worker-title");
+    if (title && worker.name) title.textContent = worker.name;
+  }
+
+  function refreshSkuDropdowns(selectId, sku) {
+    els.list.querySelectorAll("select.sku").forEach((select) => {
+      const cardId = select.closest(".worker-card")?.dataset.id;
+      const value = cardId === selectId ? sku : select.value;
+      select.innerHTML = productOptions(value);
+      select.value = value;
+    });
   }
 
   function appendLog(item) {
@@ -315,16 +357,18 @@
   function applyStatus(data) {
     if (!data) return;
     setRunning(Boolean(data.running), data.test_mode);
-    if (Array.isArray(data.workers) && data.workers.length) {
-      const byId = new Map(data.workers.map((item) => [item.id, item]));
-      state.workers = state.workers.map((worker) => ({ ...worker, ...(byId.get(worker.id) || {}) }));
-      data.workers.forEach((item) => {
-        if (!state.workers.some((worker) => worker.id === item.id)) {
-          state.workers.push(item);
+    if (!Array.isArray(data.workers) || !data.workers.length) return;
+    const byId = new Map(data.workers.map((item) => [item.id, item]));
+    state.workers = state.workers.map((worker) => ({ ...worker, ...(byId.get(worker.id) || {}) }));
+    data.workers.forEach((item) => {
+      if (!state.workers.some((worker) => worker.id === item.id)) {
+        state.workers.push(item);
+        if (!els.list.querySelector(`[data-id="${CSS.escape(item.id)}"]`)) {
+          mountWorker(item);
         }
-      });
-      renderWorkers();
-    }
+      }
+      patchWorkerStatus({ ...item, ...(state.workers.find((worker) => worker.id === item.id) || {}) });
+    });
   }
 
   function enterPreviewMode(reason) {
@@ -448,10 +492,44 @@
     if (!card) return;
     if (event.target.closest(".remove")) {
       if (state.running) return;
-      state.workers = state.workers.filter((worker) => worker.id !== card.dataset.id);
-      if (!state.workers.length) state.workers.push(defaultWorker(0));
+      const remaining = state.workers.filter((worker) => worker.id !== card.dataset.id);
+      let closed = false;
+      const finish = () => {
+        if (closed) return;
+        closed = true;
+        if (card.parentNode) card.remove();
+        state.workers = remaining.length ? remaining : [defaultWorker(0)];
+        persistDraft();
+        if (!remaining.length) mountWorker(state.workers[0]);
+        updateSaveHint();
+      };
+      card.classList.add("leave");
+      card.addEventListener("animationend", finish, { once: true });
+      window.setTimeout(finish, 280);
+    }
+    if (event.target.closest(".clone")) {
+      if (state.running) return;
+      readCardsIntoState();
+      const source = state.workers.find((item) => item.id === card.dataset.id);
+      if (!source) return;
+      const copy = {
+        ...source,
+        id: uid(),
+        name: `${source.name}_new`,
+        session_dir: `session_${Date.now()}`,
+        status: "idle",
+        purchased: 0,
+        last_message: "",
+      };
+      state.workers.push(copy);
       persistDraft();
-      renderWorkers();
+      mountWorker(copy);
+      appendLog({
+        ts: new Date().toISOString(),
+        worker: copy.name,
+        level: "info",
+        message: `已複製設定到新 session「${copy.session_dir}」。請儲存後再啟動，喺新視窗用另一個 Apple ID 登入。唔使刪舊 Worker 嘅瀏覽器資料。`,
+      });
     }
     if (event.target.closest(".focus")) {
       focusWorker(card.dataset.id);
@@ -466,7 +544,9 @@
       const worker = state.workers.find((item) => item.id === card.dataset.id);
       if (worker) worker.sku = raw;
       persistDraft();
-      renderWorkers();
+      refreshSkuDropdowns(card.dataset.id, raw);
+      card.querySelector(".sku-custom").value = "";
+      updateSaveHint();
       appendLog({
         ts: new Date().toISOString(),
         worker: worker ? worker.name : "frontend",
@@ -482,9 +562,10 @@
   els.add.addEventListener("click", () => {
     if (state.running) return;
     readCardsIntoState();
-    state.workers.push(defaultWorker(state.workers.length));
+    const worker = defaultWorker(state.workers.length);
+    state.workers.push(worker);
     persistDraft();
-    renderWorkers();
+    mountWorker(worker);
   });
   els.testMode.addEventListener("change", () => {
     modeHint();
