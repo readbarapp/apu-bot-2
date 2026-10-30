@@ -296,6 +296,7 @@ h2 { font-size: 16px; }
 .worker-card.is-sniping .grid,
 .worker-card.is-sniping .remove,
 .worker-card.is-sniping .add-sku,
+.worker-card.is-sniping .remove-sku,
 .worker-card.is-sniping .save-one {
   pointer-events: none;
   opacity: 0.5;
@@ -480,6 +481,42 @@ select option {
 
 .sku-add { display: flex; gap: 8px; }
 .sku-add input { flex: 1; }
+
+.extra-sku-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.extra-sku-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-input);
+  font-size: 13px;
+}
+
+.extra-sku-list code {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.btn.remove-sku {
+  background: transparent;
+  border-color: rgba(244, 63, 94, 0.45);
+  color: #fda4af;
+  min-height: 32px;
+  padding: 4px 10px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
 
 .card-actions {
   display: flex;

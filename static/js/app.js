@@ -7,7 +7,7 @@
   const STORAGE_SKUS = "hkIphoneBot.extraSkus";
   const STORAGE_MODE = "hkIphoneBot.testMode";
   const STORAGE_COLLAPSED = "hkIphoneBot.collapsed";
-  const PREVIEW_ALERT = "而家係預覽模式：新增／刪除 Worker、改機型、加 SKU、儲存設定都可以試。真正開瀏覽器搶購，請用 Python 開後台後打開 http://127.0.0.1:8765";
+  const PREVIEW_ALERT = "而家係預覽模式：新增／刪除 Worker、改機型、加／刪 SKU、儲存設定都可以試。真正開瀏覽器搶購，請用 Python 開後台後打開 http://127.0.0.1:8765";
   const STATUS_LABELS = {
     idle: "未登入 Apple ID",
     needs_login: "未登入 Apple ID",
@@ -160,6 +160,26 @@
       seen.add(item.sku);
       return true;
     });
+  }
+
+  function fallbackSku() {
+    return (state.catalog.products[0] && state.catalog.products[0].sku) || "MK2E4ZA/A";
+  }
+
+  function extraSkuListHtml() {
+    const extras = normalizeExtraSkus(state.extraSkus);
+    if (!extras.length) return "";
+    return `
+      <p class="help extra-sku-caption">已加入嘅自訂 SKU（打錯可以刪；內建機型刪唔到）</p>
+      <ul class="extra-sku-list">
+        ${extras.map((item) => `
+          <li>
+            <span>${esc(item.label)} <code>${esc(item.sku)}</code></span>
+            <button type="button" class="btn remove-sku" data-sku="${esc(item.sku)}">刪除</button>
+          </li>
+        `).join("")}
+      </ul>
+    `;
   }
 
   function serializeWorkers(workers) {
@@ -358,7 +378,7 @@
       const loggedIn = card.dataset.loggedIn === "true";
       const worker = state.workers.find((item) => item.id === card.dataset.id);
       card.classList.toggle("is-sniping", sniping);
-      card.querySelectorAll("input, select, button.add-sku, button.remove").forEach((node) => {
+      card.querySelectorAll("input, select, button.add-sku, button.remove-sku, button.remove").forEach((node) => {
         node.disabled = sniping;
       });
       if (worker) updateCardSaveState(worker);
@@ -465,7 +485,8 @@
               <input class="sku-label" type="text" placeholder="產品名稱（可留空）" />
               <button type="button" class="btn add-sku">加入此 SKU</button>
             </div>
-            <p class="help">唔限 iPhone，AirPods / Mac 等只要香港門市取貨適用都得。名稱留空會顯示「自訂 SKU + 編號」。加入後會記住喺呢個瀏覽器嘅下拉選單（清瀏覽器資料就會消失）。每個 Worker 只搶一個 SKU。</p>
+            <div class="extra-sku-wrap">${extraSkuListHtml()}</div>
+            <p class="help">唔限 iPhone，AirPods / Mac 等只要香港門市取貨適用都得。名稱留空會顯示「自訂 SKU + 編號」。加入後會記住喺呢個瀏覽器嘅下拉選單（清瀏覽器資料就會消失）。打錯自訂 SKU 可以喺上面撳「刪除」；內建 Duo 機型刪唔到。每個 Worker 只搶一個 SKU。</p>
           </div>
           <div class="field full">
             <span>香港指定門市（可複選）</span>
@@ -564,9 +585,13 @@
   function refreshSkuDropdowns(selectId, sku) {
     els.list.querySelectorAll("select.sku").forEach((select) => {
       const cardId = select.closest(".worker-card")?.dataset.id;
-      const value = cardId === selectId ? sku : select.value;
+      const worker = state.workers.find((item) => item.id === cardId);
+      const value = cardId === selectId ? sku : (worker?.sku || select.value);
       select.innerHTML = productOptions(value);
       select.value = value;
+    });
+    els.list.querySelectorAll(".extra-sku-wrap").forEach((wrap) => {
+      wrap.innerHTML = extraSkuListHtml();
     });
   }
 
@@ -937,6 +962,46 @@
     if (event.target.closest(".focus")) {
       focusWorker(card.dataset.id);
     }
+    if (event.target.closest(".remove-sku")) {
+      if (card.dataset.sniping === "true") return;
+      const sku = (event.target.closest(".remove-sku").dataset.sku || "").trim().toUpperCase();
+      if (!sku) return;
+      readCardsIntoState();
+      const snipingUsers = state.workers.filter((worker) => worker.sku === sku && worker.sniping);
+      if (snipingUsers.length) {
+        window.alert(`有 Worker 正用呢個 SKU 搶機（${snipingUsers.map((item) => item.name || "未命名").join("、")}）。請先暫停運作再刪。`);
+        return;
+      }
+      const extras = normalizeExtraSkus(state.extraSkus);
+      if (!extras.some((item) => item.sku === sku)) return;
+      state.extraSkus = extras.filter((item) => item.sku !== sku);
+      const fallback = fallbackSku();
+      const switched = [];
+      state.workers.forEach((worker) => {
+        if (worker.sku === sku) {
+          worker.sku = fallback;
+          switched.push(worker.name || "未命名");
+        }
+      });
+      persistDraft();
+      refreshSkuDropdowns();
+      state.workers.forEach((worker) => {
+        updateCardSaveState(worker);
+        patchWorkerStatus(worker);
+      });
+      updateSaveHint();
+      setRunning(state.running, els.testMode.checked);
+      const switchedNote = switched.length
+        ? ` 用緊呢個編號嘅 Worker（${switched.join("、")}）已改回預設機型，請記得撳「儲存此 Worker」。`
+        : "";
+      appendLog({
+        ts: new Date().toISOString(),
+        worker: "frontend",
+        level: "success",
+        message: `已從呢個瀏覽器嘅選單刪除自訂 SKU ${sku}。內建機型刪唔到。${switchedNote}`,
+      });
+      return;
+    }
     if (event.target.closest(".add-sku")) {
       if (card.dataset.sniping === "true") return;
       const raw = card.querySelector(".sku-custom").value.trim().toUpperCase();
@@ -960,6 +1025,7 @@
       card.querySelector(".sku-custom").value = "";
       if (card.querySelector(".sku-label")) card.querySelector(".sku-label").value = "";
       updateSaveHint();
+      setRunning(state.running, els.testMode.checked);
       const shown = extras.find((item) => item.sku === raw)?.label || `自訂 SKU ${raw}`;
       appendLog({
         ts: new Date().toISOString(),
@@ -1004,7 +1070,7 @@
     modeHint();
 
     if (location.protocol === "file:") {
-      enterPreviewMode("你而家打開緊 preview.html。可以試新增／刪除 Worker、改機型、加 SKU、儲存設定。");
+      enterPreviewMode("你而家打開緊 preview.html。可以試新增／刪除 Worker、改機型、加／刪 SKU、儲存設定。");
       renderWorkers();
       return;
     }
