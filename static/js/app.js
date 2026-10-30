@@ -67,7 +67,7 @@
 
   const state = {
     catalog: { stores: [], products: [], pickup_windows: [] },
-    extraSkus: loadJson(STORAGE_SKUS, []),
+    extraSkus: [],
     workers: [],
     savedWorkers: loadJson(STORAGE_SAVED, []),
     running: false,
@@ -83,6 +83,36 @@
     } catch {
       return fallback;
     }
+  }
+
+  function normalizeExtraSkus(raw) {
+    if (!Array.isArray(raw)) return [];
+    const extras = [];
+    const seen = new Set();
+    for (const item of raw) {
+      const sku = String(typeof item === "string" ? item : item && item.sku ? item.sku : "").trim().toUpperCase();
+      if (!sku || seen.has(sku)) continue;
+      seen.add(sku);
+      const label = typeof item === "object" && item && item.label
+        ? String(item.label).trim()
+        : "";
+      extras.push({ sku, label: label || `自訂 SKU ${sku}` });
+    }
+    return extras;
+  }
+
+  function confirmLiveStart() {
+    if (els.testMode.checked) return true;
+    if (!window.confirm(LIVE_CONFIRM)) {
+      appendLog({
+        ts: new Date().toISOString(),
+        worker: "frontend",
+        level: "warn",
+        message: "使用者取消真實下單啟動，沒有開始搶貨。",
+      });
+      return false;
+    }
+    return true;
   }
 
   function saveJson(key, value) {
@@ -123,7 +153,7 @@
   }
 
   function allProducts() {
-    const extras = state.extraSkus.map((sku) => ({ sku, label: `自訂 SKU ${sku}` }));
+    const extras = normalizeExtraSkus(state.extraSkus);
     const seen = new Set();
     return [...state.catalog.products, ...extras].filter((item) => {
       if (seen.has(item.sku)) return false;
@@ -429,12 +459,13 @@
           <div class="field full sku-block">
             <span>1. 目標機型（每個 Worker 只搶一個 SKU）</span>
             <select class="sku" aria-label="目標機型 SKU">${productOptions(worker.sku)}</select>
-            <span>2. 或者輸入任何 Apple 產品 SKU 再加入選單</span>
+            <span>2. 或者輸入任何 Apple 產品 SKU（唔限 iPhone）再加入選單</span>
             <div class="sku-add">
-              <input class="sku-custom" type="text" placeholder="例如 MK2E4ZA/A" />
+              <input class="sku-custom" type="text" placeholder="SKU，例如 MK2E4ZA/A" />
+              <input class="sku-label" type="text" placeholder="產品名稱（可留空）" />
               <button type="button" class="btn add-sku">加入此 SKU</button>
             </div>
-            <p class="help">一個 Worker 同一時間只會監控同搶呢一個 SKU。要搶第二款，請新增另一個 Worker。</p>
+            <p class="help">唔限 iPhone，AirPods / Mac 等只要香港門市取貨適用都得。名稱留空會顯示「自訂 SKU + 編號」。加入後會記住喺呢個瀏覽器嘅下拉選單（清瀏覽器資料就會消失）。每個 Worker 只搶一個 SKU。</p>
           </div>
           <div class="field full">
             <span>香港指定門市（可複選）</span>
@@ -652,6 +683,7 @@
       updateStartGate();
       return;
     }
+    if (!confirmLiveStart()) return;
     if (state.previewMode) {
       state.workers.forEach((worker) => {
         worker.sniping = true;
@@ -666,10 +698,6 @@
         level: "success",
         message: "預覽模式：已模擬全部開始搶機。真正開瀏覽器請用 python app.py。",
       });
-      return;
-    }
-    if (!els.testMode.checked && !window.confirm(LIVE_CONFIRM)) {
-      appendLog({ ts: new Date().toISOString(), worker: "frontend", level: "warn", message: "使用者取消真實下單啟動" });
       return;
     }
     els.start.disabled = true;
@@ -772,10 +800,7 @@
       window.alert("請先撳「登入 Apple ID」，登入成功後先可以開始運作。");
       return;
     }
-    if (!els.testMode.checked && !window.confirm(LIVE_CONFIRM)) {
-      appendLog({ ts: new Date().toISOString(), worker: "frontend", level: "warn", message: "使用者取消真實下單啟動" });
-      return;
-    }
+    if (!confirmLiveStart()) return;
     if (state.previewMode) {
       worker.sniping = true;
       worker.status = "watching";
@@ -918,18 +943,28 @@
         window.alert("請先輸入 SKU，例如 MK2E4ZA/A");
         return;
       }
-      if (!state.extraSkus.includes(raw)) state.extraSkus.push(raw);
+      const name = (card.querySelector(".sku-label")?.value || "").trim();
+      const extras = normalizeExtraSkus(state.extraSkus);
+      const existing = extras.find((item) => item.sku === raw);
+      if (existing) {
+        if (name) existing.label = name;
+      } else {
+        extras.push({ sku: raw, label: name || `自訂 SKU ${raw}` });
+      }
+      state.extraSkus = extras;
       const worker = state.workers.find((item) => item.id === card.dataset.id);
       if (worker) worker.sku = raw;
       persistDraft();
       refreshSkuDropdowns(card.dataset.id, raw);
       card.querySelector(".sku-custom").value = "";
+      if (card.querySelector(".sku-label")) card.querySelector(".sku-label").value = "";
       updateSaveHint();
+      const shown = extras.find((item) => item.sku === raw)?.label || `自訂 SKU ${raw}`;
       appendLog({
         ts: new Date().toISOString(),
         worker: worker ? worker.name : "frontend",
         level: "success",
-        message: `已加入 SKU ${raw}，並設為呢個 Worker 嘅目標機型。請記得撳「儲存此 Worker」。`,
+        message: `已加入 ${shown}（${raw}）到呢個瀏覽器嘅下拉選單，並設為呢個 Worker 嘅目標。請記得撳「儲存此 Worker」。`,
       });
     }
   });
@@ -961,6 +996,7 @@
   async function boot() {
     const saved = loadJson(STORAGE_SAVED, []);
     const draft = loadJson(STORAGE_PROFILES, []);
+    state.extraSkus = normalizeExtraSkus(loadJson(STORAGE_SKUS, []));
     state.savedWorkers = saved;
     state.workers = (draft.length ? draft : saved).length ? (draft.length ? draft : saved) : [defaultWorker(0)];
     els.testMode.checked = localStorage.getItem(STORAGE_MODE) !== "0";

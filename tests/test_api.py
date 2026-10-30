@@ -55,7 +55,17 @@ def test_index_and_frontend_assets(client) -> None:
     assert "預覽模式" in preview
     assert "儲存此 Worker" in preview
     assert "加入此 SKU" in js.text
+    assert "sku-label" in js.text
+    assert "confirmLiveStart" in js.text
     assert "初次設定流程" in preview
+
+
+def test_live_confirm_runs_before_global_start() -> None:
+    js = Path("static/js/app.js").read_text()
+    start_fn = js.split("async function start()")[1].split("async function stop()")[0]
+    assert start_fn.index("confirmLiveStart") < start_fn.index("state.previewMode")
+    run_fn = js.split("async function runOne(")[1].split("async function pauseOne(")[0]
+    assert run_fn.index("confirmLiveStart") < run_fn.index("state.previewMode")
 
 
 def test_duplicate_session_dir_rejected(client) -> None:
@@ -167,3 +177,17 @@ def test_confirm_copy_lives_only_on_frontend() -> None:
     app = Path("app.py").read_text()
     assert "window.confirm" in js
     assert "window.confirm" not in app
+
+
+def test_readme_is_windows_local_guide() -> None:
+    text = Path("README.md").read_text()
+    assert "第一次安裝" in text
+    assert "每次點樣開控制台" in text
+    assert "PowerShell" in text
+    assert "http://127.0.0.1:8765" in text
+    assert "每部電腦都係同一條" in text
+    assert "一直輪詢" in text
+    assert "有冇資安問題" in text
+    assert "host=\"127.0.0.1\"" in Path("app.py").read_text()
+    assert "Spotlight" not in text
+    assert "source .venv/bin/activate" not in text
