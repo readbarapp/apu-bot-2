@@ -58,6 +58,10 @@ def test_index_and_frontend_assets(client) -> None:
     assert "sku-label" in js.text
     assert "confirmLiveStart" in js.text
     assert "初次設定流程" in preview
+    assert "購買數量上限（此 Worker 全部門市合計）" in js.text
+    assert "唔係每間門市各 2 部" in js.text
+    assert "數量上限係此 Worker 全部門市合計" in page.text
+    assert "數量上限係此 Worker 全部門市合計" in preview
 
 
 def test_live_confirm_runs_before_global_start() -> None:

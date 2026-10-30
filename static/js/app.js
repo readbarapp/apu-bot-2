@@ -475,9 +475,10 @@
             <span>取貨時間限制</span>
             <select class="pickup">${pickupOptions(worker.pickup_window)}</select>
           </label>
-          <label class="field">
-            <span>購買數量上限</span>
+          <label class="field full">
+            <span>購買數量上限（此 Worker 全部門市合計）</span>
             <input class="qty" type="number" min="1" max="99" value="${esc(worker.max_qty)}" />
+            <p class="help">複選 ifc + 沙田、上限填 2：最多搶 2 部（例如 1 部 ifc + 1 部沙田），唔係每間門市各 2 部。Apple 同一型號通常每人最多 2 部。同一個 Apple ID 開多個 Worker 會各自再計一次上限。</p>
           </label>
         </div>
         <div class="card-save">

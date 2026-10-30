@@ -396,6 +396,7 @@ class Worker:
                     stop_event=self.stop_event,
                 )
                 if result.ok:
+                    # One worker-wide counter for every selected store combined.
                     self.purchased += 1
                     if result.reason == "dry_run":
                         self._set(
