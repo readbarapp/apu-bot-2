@@ -8,6 +8,9 @@
 </head>
 <body>
   <div class="shell">
+    <div id="preview-banner" class="preview-banner" hidden>
+      預覽模式：後台未連上。而家只可以睇控制台個樣。真正搶購請用 Python 開後台後打開 http://127.0.0.1:8765
+    </div>
     <header class="topbar">
       <div>
         <p class="eyebrow">Hong Kong · Apple Store Pickup</p>
@@ -19,7 +22,7 @@
     <section class="global" aria-label="全域控制面板">
       <div class="global-copy">
         <h2>全域控制面板</h2>
-        <p>由本頁啟動、傳遞 Worker 設定、聚焦視窗與緊急停止。後台不會自行開跑。</p>
+        <p>請先喺下面改好 Worker、撳「儲存設定」，再按全域啟動。後台唔會自行開跑。</p>
       </div>
       <label class="switch">
         <input type="checkbox" id="test-mode" checked />
@@ -39,10 +42,14 @@
         <div class="panel-head">
           <div>
             <h2>Worker Profiles</h2>
-            <p>每個 Worker 使用獨立瀏覽器與 Apple ID session。</p>
+            <p>每個 Worker 使用獨立瀏覽器與 Apple ID session。改完設定要先儲存，先至可以全域啟動。</p>
           </div>
-          <button type="button" id="btn-add" class="btn ghost">新增 Worker</button>
+          <div class="panel-actions">
+            <button type="button" id="btn-save" class="btn save">儲存設定</button>
+            <button type="button" id="btn-add" class="btn add">新增 Worker</button>
+          </div>
         </div>
+        <p id="save-hint" class="save-hint dirty">尚未儲存。請先按「儲存設定」，再按全域啟動。</p>
         <div id="worker-list"></div>
       </section>
 

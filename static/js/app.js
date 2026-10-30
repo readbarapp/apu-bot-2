@@ -3,8 +3,45 @@
     "警告：您目前未開啟測試模式，系統啟動後若偵測到有貨將會進行真實的信用卡扣款與下單！請問是否確定要啟動？";
 
   const STORAGE_PROFILES = "hkIphoneBot.profiles";
+  const STORAGE_SAVED = "hkIphoneBot.savedProfiles";
   const STORAGE_SKUS = "hkIphoneBot.extraSkus";
   const STORAGE_MODE = "hkIphoneBot.testMode";
+  const PREVIEW_ALERT = "而家係預覽模式：新增／刪除 Worker、改機型、加 SKU、儲存設定都可以試。真正開瀏覽器搶購，請用 Python 開後台後打開 http://127.0.0.1:8765";
+  const STATUS_LABELS = {
+    idle: "待命（未啟動）",
+    launching: "正在開啟瀏覽器",
+    watching: "監控庫存中",
+    checking_out: "正在結帳",
+    dry_run_paused: "測試完成（已停在最後一步）",
+    completed: "已達數量上限",
+    stopped: "已停止",
+    error: "發生錯誤",
+  };
+  const FALLBACK_CATALOG = {
+    stores: [
+      { id: "R428", name: "ifc mall", area: "中環" },
+      { id: "R409", name: "Hysan Place", area: "銅鑼灣" },
+      { id: "R499", name: "Canton Road", area: "尖沙咀" },
+      { id: "R485", name: "Festival Walk", area: "九龍塘" },
+      { id: "R673", name: "apm Hong Kong", area: "觀塘" },
+      { id: "R610", name: "New Town Plaza", area: "沙田" },
+    ],
+    products: [
+      { sku: "MK2D4ZA/A", label: "iPhone Duo 256GB 星光白色" },
+      { sku: "MK2E4ZA/A", label: "iPhone Duo 256GB 夜空色" },
+      { sku: "MK2F4ZA/A", label: "iPhone Duo 512GB 星光白色" },
+      { sku: "MK2G4ZA/A", label: "iPhone Duo 512GB 夜空色" },
+      { sku: "MK2H4ZA/A", label: "iPhone Duo 1TB 星光白色" },
+      { sku: "MK2J4ZA/A", label: "iPhone Duo 1TB 夜空色" },
+      { sku: "MK2K4ZA/A", label: "iPhone Duo 2TB 星光白色" },
+      { sku: "MK2L4ZA/A", label: "iPhone Duo 2TB 夜空色" },
+    ],
+    pickup_windows: [
+      { id: "1d", label: "一日內" },
+      { id: "2d", label: "兩日內" },
+      { id: "3d", label: "三日內" },
+    ],
+  };
 
   const els = {
     testMode: document.getElementById("test-mode"),
@@ -12,6 +49,8 @@
     start: document.getElementById("btn-start"),
     stop: document.getElementById("btn-stop"),
     add: document.getElementById("btn-add"),
+    save: document.getElementById("btn-save"),
+    saveHint: document.getElementById("save-hint"),
     list: document.getElementById("worker-list"),
     logs: document.getElementById("log-stream"),
     pill: document.getElementById("run-pill"),
@@ -22,8 +61,11 @@
     catalog: { stores: [], products: [], pickup_windows: [] },
     extraSkus: loadJson(STORAGE_SKUS, []),
     workers: [],
+    savedWorkers: loadJson(STORAGE_SAVED, []),
     running: false,
     stickLogs: true,
+    previewMode: false,
+    dirty: true,
   };
 
   function loadJson(key, fallback) {
@@ -47,6 +89,10 @@
 
   function uid() {
     return crypto.randomUUID ? crypto.randomUUID() : `w_${Date.now()}_${Math.random()}`;
+  }
+
+  function statusLabel(status) {
+    return STATUS_LABELS[status] || STATUS_LABELS.idle;
   }
 
   function defaultWorker(index) {
@@ -75,16 +121,40 @@
     });
   }
 
-  function persist() {
-    saveJson(STORAGE_PROFILES, state.workers.map(({ id, name, session_dir, sku, stores, pickup_window, max_qty }) => ({
+  function serializeWorkers(workers) {
+    return workers.map(({ id, name, session_dir, sku, stores, pickup_window, max_qty }) => ({
       id, name, session_dir, sku, stores, pickup_window, max_qty,
-    })));
+    }));
+  }
+
+  function persistDraft() {
+    saveJson(STORAGE_PROFILES, serializeWorkers(state.workers));
     saveJson(STORAGE_SKUS, state.extraSkus);
     localStorage.setItem(STORAGE_MODE, els.testMode.checked ? "1" : "0");
   }
 
+  function updateSaveHint() {
+    if (!els.saveHint) return;
+    const current = JSON.stringify(serializeWorkers(state.workers));
+    const saved = JSON.stringify(state.savedWorkers || []);
+    state.dirty = current !== saved;
+    if (!(state.savedWorkers && state.savedWorkers.length)) {
+      els.saveHint.className = "save-hint dirty";
+      els.saveHint.textContent = "尚未儲存。請先按綠色「儲存設定」，再按藍色「全域啟動」。啟動只會用已儲存嘅 Worker 設定。";
+      return;
+    }
+    if (state.dirty) {
+      els.saveHint.className = "save-hint dirty";
+      els.saveHint.textContent = "有未儲存變更。請先按「儲存設定」，否則不能全域啟動。";
+      return;
+    }
+    els.saveHint.className = "save-hint saved";
+    els.saveHint.textContent = `已儲存 ${state.savedWorkers.length} 個 Worker。按全域啟動時會用呢份設定。`;
+  }
+
   function readCardsIntoState() {
     const cards = [...els.list.querySelectorAll(".worker-card")];
+    if (!cards.length) return;
     state.workers = cards.map((card) => {
       const stores = [...card.querySelectorAll(".store:checked")].map((box) => box.value);
       return {
@@ -100,7 +170,8 @@
         purchased: Number(card.dataset.purchased || 0),
       };
     });
-    persist();
+    persistDraft();
+    updateSaveHint();
   }
 
   function modeHint() {
@@ -114,6 +185,7 @@
     els.start.disabled = running;
     els.stop.disabled = !running;
     els.add.disabled = running;
+    if (els.save) els.save.disabled = running;
     els.testMode.disabled = running;
     els.list.querySelectorAll("input, select, button.add-sku, button.remove").forEach((node) => {
       node.disabled = running;
@@ -127,15 +199,18 @@
     } else if (running) {
       els.pill.className = "pill running";
       els.pill.textContent = "運行中 · 測試模式";
+    } else if (state.previewMode) {
+      els.pill.className = "pill idle";
+      els.pill.textContent = "預覽 · 後台未啟動";
     } else {
       els.pill.className = "pill idle";
-      els.pill.textContent = "未啟動 · 等待前端指令";
+      els.pill.textContent = "待命 · 等待前端指令";
     }
   }
 
   function productOptions(selected) {
     const options = allProducts().map((item) => (
-      `<option value="${esc(item.sku)}" ${item.sku === selected ? "selected" : ""}>${esc(item.label)} (${esc(item.sku)})</option>`
+      `<option value="${esc(item.sku)}" ${item.sku === selected ? "selected" : ""}>${esc(item.label)}（${esc(item.sku)}）</option>`
     ));
     if (selected && !allProducts().some((item) => item.sku === selected)) {
       options.push(`<option value="${esc(selected)}" selected>自訂 SKU ${esc(selected)}</option>`);
@@ -159,11 +234,13 @@
   }
 
   function renderWorkers() {
-    els.list.innerHTML = state.workers.map((worker) => `
-      <article class="worker-card" data-id="${esc(worker.id)}" data-status="${esc(worker.status || "idle")}" data-message="${esc(worker.last_message || "")}" data-purchased="${esc(worker.purchased || 0)}">
+    els.list.innerHTML = state.workers.map((worker) => {
+      const status = worker.status || "idle";
+      return `
+      <article class="worker-card" data-id="${esc(worker.id)}" data-status="${esc(status)}" data-message="${esc(worker.last_message || "")}" data-purchased="${esc(worker.purchased || 0)}">
         <div class="worker-top">
           <strong>${esc(worker.name)}</strong>
-          <span class="badge ${esc(worker.status || "idle")}">${esc(worker.status || "idle")}${worker.purchased ? ` · ${worker.purchased}/${worker.max_qty}` : ""}</span>
+          <span class="badge ${esc(status)}">${esc(statusLabel(status))}${worker.purchased ? ` · ${worker.purchased}/${worker.max_qty}` : ""}</span>
         </div>
         <div class="grid">
           <label class="field">
@@ -174,13 +251,15 @@
             <span>Apple ID Session 資料夾</span>
             <input class="session" type="text" value="${esc(worker.session_dir)}" placeholder="session_worker_1" />
           </label>
-          <div class="field full">
-            <span>目標機型 / SKU</span>
-            <div class="sku-row">
-              <select class="sku">${productOptions(worker.sku)}</select>
-              <input class="sku-custom" type="text" placeholder="輸入 Apple 產品 SKU" />
-              <button type="button" class="btn tiny add-sku">新增型號</button>
+          <div class="field full sku-block">
+            <span>1. 目標機型（下拉選單揀 Duo 型號）</span>
+            <select class="sku" aria-label="目標機型 SKU">${productOptions(worker.sku)}</select>
+            <span>2. 或者輸入任何 Apple 產品 SKU 再加入選單</span>
+            <div class="sku-add">
+              <input class="sku-custom" type="text" placeholder="例如 MK2E4ZA/A" />
+              <button type="button" class="btn add-sku">加入此 SKU</button>
             </div>
+            <p class="help">加入之後會出現喺上面嘅下拉選單，再揀佢做呢個 Worker 嘅目標機型。</p>
           </div>
           <div class="field full">
             <span>香港指定門市（可複選）</span>
@@ -196,12 +275,14 @@
           </label>
         </div>
         <div class="card-actions">
-          <button type="button" class="btn tiny focus" ${state.running ? "" : "disabled"}>顯示此 Worker 視窗 (Bring to Front)</button>
-          <button type="button" class="btn tiny remove">刪除</button>
+          <button type="button" class="btn focus" ${state.running ? "" : "disabled"}>顯示此 Worker 視窗</button>
+          <button type="button" class="btn remove">刪除此 Worker</button>
         </div>
       </article>
-    `).join("");
+    `;
+    }).join("");
     setRunning(state.running, els.testMode.checked);
+    updateSaveHint();
   }
 
   function appendLog(item) {
@@ -246,14 +327,55 @@
     }
   }
 
-  async function start() {
+  function enterPreviewMode(reason) {
+    state.previewMode = true;
+    state.catalog = FALLBACK_CATALOG;
+    const banner = document.getElementById("preview-banner");
+    if (banner) banner.hidden = false;
+    els.pill.className = "pill idle";
+    els.pill.textContent = "預覽 · 後台未啟動";
+    appendLog({
+      ts: new Date().toISOString(),
+      worker: "frontend",
+      level: "warn",
+      message: reason || "未連到後台，已切換為預覽模式。設定同儲存都可以試，但唔會開瀏覽器、唔會下單。",
+    });
+  }
+
+  function saveSettings() {
+    if (state.running) return false;
     readCardsIntoState();
-    if (!els.testMode.checked && !window.confirm(LIVE_CONFIRM)) {
-      appendLog({ ts: new Date().toISOString(), worker: "frontend", level: "warn", message: "使用者取消真實下單啟動" });
+    for (const worker of state.workers) {
+      if (!worker.name || !worker.session_dir || !worker.sku || !worker.stores.length) {
+        window.alert("每個 Worker 都要有名稱、session 資料夾、目標機型，同至少一間香港門市。");
+        return false;
+      }
+    }
+    state.savedWorkers = serializeWorkers(state.workers);
+    saveJson(STORAGE_SAVED, state.savedWorkers);
+    persistDraft();
+    updateSaveHint();
+    appendLog({
+      ts: new Date().toISOString(),
+      worker: "frontend",
+      level: "success",
+      message: `已儲存 ${state.savedWorkers.length} 個 Worker 設定。全域啟動會用呢份設定。`,
+    });
+    return true;
+  }
+
+  async function start() {
+    if (state.previewMode) {
+      window.alert(PREVIEW_ALERT);
       return;
     }
-    if (!state.workers.length) {
-      window.alert("請至少新增一個 Worker Profile");
+    readCardsIntoState();
+    if (!state.savedWorkers.length || state.dirty) {
+      window.alert("請先喺 Worker Profiles 撳綠色「儲存設定」，再按全域啟動。系統只會用已儲存嘅 Worker 設定來跑。");
+      return;
+    }
+    if (!els.testMode.checked && !window.confirm(LIVE_CONFIRM)) {
+      appendLog({ ts: new Date().toISOString(), worker: "frontend", level: "warn", message: "使用者取消真實下單啟動" });
       return;
     }
     els.start.disabled = true;
@@ -262,9 +384,7 @@
         method: "POST",
         body: JSON.stringify({
           test_mode: els.testMode.checked,
-          workers: state.workers.map(({ id, name, session_dir, sku, stores, pickup_window, max_qty }) => ({
-            id, name, session_dir, sku, stores, pickup_window, max_qty,
-          })),
+          workers: state.savedWorkers,
         }),
       });
       applyStatus(data);
@@ -275,6 +395,10 @@
   }
 
   async function stop() {
+    if (state.previewMode) {
+      window.alert(PREVIEW_ALERT);
+      return;
+    }
     try {
       const data = await api("/api/stop", { method: "POST" });
       applyStatus(data);
@@ -284,6 +408,10 @@
   }
 
   async function focusWorker(id) {
+    if (state.previewMode) {
+      window.alert(PREVIEW_ALERT);
+      return;
+    }
     try {
       await api(`/api/workers/${encodeURIComponent(id)}/focus`, { method: "POST" });
     } catch (err) {
@@ -292,6 +420,9 @@
   }
 
   function connectLogs() {
+    if (state.previewMode || location.protocol === "file:") {
+      return;
+    }
     const protocol = location.protocol === "https:" ? "wss" : "ws";
     const socket = new WebSocket(`${protocol}://${location.host}/ws/logs`);
     socket.addEventListener("message", (event) => {
@@ -319,7 +450,7 @@
       if (state.running) return;
       state.workers = state.workers.filter((worker) => worker.id !== card.dataset.id);
       if (!state.workers.length) state.workers.push(defaultWorker(0));
-      persist();
+      persistDraft();
       renderWorkers();
     }
     if (event.target.closest(".focus")) {
@@ -327,29 +458,39 @@
     }
     if (event.target.closest(".add-sku")) {
       const raw = card.querySelector(".sku-custom").value.trim().toUpperCase();
-      if (!raw) return;
+      if (!raw) {
+        window.alert("請先輸入 SKU，例如 MK2E4ZA/A");
+        return;
+      }
       if (!state.extraSkus.includes(raw)) state.extraSkus.push(raw);
       const worker = state.workers.find((item) => item.id === card.dataset.id);
       if (worker) worker.sku = raw;
-      persist();
+      persistDraft();
       renderWorkers();
+      appendLog({
+        ts: new Date().toISOString(),
+        worker: worker ? worker.name : "frontend",
+        level: "success",
+        message: `已加入 SKU ${raw}，並設為呢個 Worker 嘅目標機型。請記得按「儲存設定」。`,
+      });
     }
   });
 
   els.start.addEventListener("click", start);
   els.stop.addEventListener("click", stop);
+  if (els.save) els.save.addEventListener("click", saveSettings);
   els.add.addEventListener("click", () => {
     if (state.running) return;
     readCardsIntoState();
     state.workers.push(defaultWorker(state.workers.length));
-    persist();
+    persistDraft();
     renderWorkers();
   });
   els.testMode.addEventListener("change", () => {
     modeHint();
-    persist();
-    if (!state.running) {
-      els.pill.textContent = els.testMode.checked ? "未啟動 · 測試模式待命" : "未啟動 · 真實下單模式（需確認）";
+    persistDraft();
+    if (!state.running && !state.previewMode) {
+      els.pill.textContent = els.testMode.checked ? "待命 · 測試模式" : "待命 · 真實下單模式（需確認）";
     }
   });
   els.clearLogs.addEventListener("click", () => {
@@ -361,16 +502,36 @@
   });
 
   async function boot() {
-    state.catalog = await api("/api/catalog");
-    const saved = loadJson(STORAGE_PROFILES, []);
-    state.workers = saved.length ? saved : [defaultWorker(0)];
+    const saved = loadJson(STORAGE_SAVED, []);
+    const draft = loadJson(STORAGE_PROFILES, []);
+    state.savedWorkers = saved;
+    state.workers = (draft.length ? draft : saved).length ? (draft.length ? draft : saved) : [defaultWorker(0)];
     els.testMode.checked = localStorage.getItem(STORAGE_MODE) !== "0";
     modeHint();
+
+    if (location.protocol === "file:") {
+      enterPreviewMode("你而家打開緊 preview.html。可以試新增／刪除 Worker、改機型、加 SKU、儲存設定。");
+      renderWorkers();
+      return;
+    }
+
+    try {
+      state.catalog = await api("/api/catalog");
+    } catch {
+      enterPreviewMode("連唔到後台 API，已切換為預覽模式。設定同儲存都可以試。");
+      renderWorkers();
+      return;
+    }
+
     renderWorkers();
     connectLogs();
-    const status = await api("/api/status");
-    applyStatus(status);
+    try {
+      applyStatus(await api("/api/status"));
+    } catch {
+      /* first status poll is optional */
+    }
     setInterval(async () => {
+      if (state.previewMode) return;
       try {
         applyStatus(await api("/api/status"));
       } catch {
@@ -380,6 +541,7 @@
   }
 
   boot().catch((err) => {
-    appendLog({ ts: new Date().toISOString(), worker: "frontend", level: "error", message: err.message });
+    enterPreviewMode(err.message);
+    renderWorkers();
   });
 })();
