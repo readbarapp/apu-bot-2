@@ -9,7 +9,7 @@
 <body>
   <div class="shell">
     <div id="preview-banner" class="preview-banner">
-      預覽模式：可以試新增／刪除 Worker、改目標機型、加入 SKU、儲存設定。全域啟動／顯示視窗要先用 Python 開後台，然後打開 http://127.0.0.1:8765
+      預覽模式：可以試新增／刪除 Worker、摺疊、逐張卡儲存、開始／暫停。真正開瀏覽器請用 Python 開後台，然後打開 http://127.0.0.1:8765
     </div>
     <header class="topbar">
       <div>
@@ -20,17 +20,17 @@
     </header>
 
     <ol class="flow" aria-label="初次設定流程">
-      <li><strong>1. 設定 Worker</strong>揀機型、門市、數量，每個 Worker 用唔同 session 資料夾（一個資料夾 = 一個 Apple ID）。</li>
-      <li><strong>2. 儲存設定</strong>撳綠色「儲存設定」。全域啟動只會用已儲存嘅 Worker。</li>
-      <li><strong>3. 登入 Apple ID</strong>撳該 Worker 嘅「登入 Apple ID」，視窗會帶到最前並打開登入頁。登入成功後先會顯示電郵，狀態變成待命。</li>
-      <li><strong>4. 開始搶機</strong>待命之後先可以「開始運作」或「全域啟動」。搶夠上限會自動停；停止運作唔會登出。</li>
+      <li><strong>1. 設定 Worker</strong>每個 Worker 搶一個 SKU、用一個 Apple ID。揀機型、門市、數量後撳該卡嘅「儲存此 Worker」。</li>
+      <li><strong>2. 登入 Apple ID</strong>每張卡撳「登入 Apple ID」。全部登入好先至可以撳綠色大掣。</li>
+      <li><strong>3. 全部開始搶機</strong>綠色大掣一次過開全部。單個用「開始運作／暫停運作」。運作中唔可以改設定。</li>
+      <li><strong>4. 暫停先至可以改</strong>要改機型或門市，先暫停運作。手動關瀏覽器會自動停嗰個，再撳「開始運作」可重開。</li>
     </ol>
-    <div id="run-lock" class="run-lock" hidden>有 Worker 正在搶機：嗰粒嘅設定已鎖定。其他 Worker 仍可登入、開始或停止運作。緊急停止會關閉全部瀏覽器。</div>
+    <div id="run-lock" class="run-lock" hidden>有 Worker 正在搶機：嗰粒嘅所有設定已鎖定。要改資料請先「暫停運作」。緊急停止會關閉全部瀏覽器。</div>
 
     <section class="global" aria-label="全域控制面板">
       <div class="global-copy">
-        <h2>全域控制面板</h2>
-        <p>請先儲存、登入 Apple ID 變成待命，再按開始運作或全域啟動。後台唔會自行開跑。</p>
+        <h2>全部開始搶機</h2>
+        <p>呢粒綠色大掣會一次過叫<strong>所有</strong> Worker 去搶。每個 Worker 都要先登入 Apple ID；未登入就要登入或刪除嗰個。</p>
       </div>
       <label class="switch">
         <input type="checkbox" id="test-mode" checked />
@@ -40,8 +40,9 @@
         </span>
       </label>
       <div class="global-actions">
-        <button type="button" id="btn-start" class="btn primary">全域啟動 (Start)</button>
-        <button type="button" id="btn-stop" class="btn danger" disabled>緊急停止所有 Bot (Emergency Stop)</button>
+        <button type="button" id="btn-start" class="btn go" disabled>全部開始搶機</button>
+        <p id="start-hint" class="start-hint blocked">請先喺每張卡撳「儲存此 Worker」，並登入 Apple ID。</p>
+        <button type="button" id="btn-stop" class="btn danger" disabled>緊急停止所有 Bot</button>
       </div>
     </section>
 
@@ -50,14 +51,13 @@
         <div class="panel-head">
           <div>
             <h2>Worker Profiles</h2>
-            <p>每個 Worker 獨立 Apple ID。未登入會顯示登入掣；登入後先係待命，再按開始／停止運作。</p>
+            <p>每張卡自己儲存、自己登入、自己開始／暫停。運作中設定會鎖死。要一次過全部開搶，用上面綠色大掣。</p>
           </div>
           <div class="panel-actions">
-            <button type="button" id="btn-save" class="btn save">儲存設定</button>
             <button type="button" id="btn-add" class="btn add">新增 Worker</button>
           </div>
         </div>
-        <p id="save-hint" class="save-hint dirty">尚未儲存。請先按「儲存設定」，再按全域啟動。</p>
+        <p id="save-hint" class="save-hint dirty">每個 Worker 要喺自己張卡撳「儲存此 Worker」。</p>
         <div id="worker-list" class="worker-list"></div>
       </section>
 

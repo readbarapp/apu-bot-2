@@ -10,6 +10,14 @@ SKIP_EMAILS = {
     "webmaster@apple.com",
 }
 
+# Apple Store commerce cookies that appear after a successful Apple ID login.
+SESSION_COOKIE_NAMES = {"myacinfo", "as_cn"}
+
+
+def cookies_indicate_apple_login(cookies: list[dict] | None) -> bool:
+    names = {str(item.get("name", "")).lower() for item in cookies or []}
+    return bool(names & SESSION_COOKIE_NAMES)
+
 
 def extract_email_from_text(text: str) -> str | None:
     if not text:
@@ -45,6 +53,8 @@ async def detect_apple_id(page) -> str | None:
                 '[data-autom*="email" i]',
                 '[data-testid*="email" i]',
                 '.rs-account-email',
+                '.as-accountinfo',
+                '.account-email',
                 '#login-appleId',
                 'input[type="email"]'
               ];
@@ -62,3 +72,13 @@ async def detect_apple_id(page) -> str | None:
     if isinstance(from_dom, str) and "@" in from_dom and " " not in from_dom.strip():
         return extract_email_from_text(from_dom) or from_dom.strip()
     return extract_email_from_text(str(from_dom or ""))
+
+
+async def has_apple_session(context) -> bool:
+    if context is None:
+        return False
+    try:
+        cookies = await context.cookies()
+    except Exception:
+        return False
+    return cookies_indicate_apple_login(cookies)

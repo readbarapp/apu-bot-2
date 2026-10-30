@@ -30,6 +30,7 @@ class BotManager:
         self.running = any(worker.sniping for worker in self.workers.values())
 
     def status(self) -> dict:
+        self._refresh_running()
         workers = [worker.snapshot() for worker in self.workers.values()]
         if not workers and self._started:
             workers = [
@@ -113,27 +114,32 @@ class BotManager:
     async def start(self, request: StartRequest) -> dict:
         self.test_mode = request.test_mode
         self._started = request
-        hub.info("system", "前端已發出全域啟動指令")
+        hub.info("system", "前端已發出全部開始搶機指令")
         if request.test_mode:
             hub.info("system", "測試模式開啟：偵測到貨源時會停在最後一步，不會扣款下單")
         else:
             hub.warn("system", "真實下單模式：偵測到符合條件的貨源時將自動送出訂單並可能信用卡扣款")
 
         ready: list[Worker] = []
+        pending: list[str] = []
         for profile in request.workers:
             worker = await self._upsert(profile, request.test_mode)
-            if not worker.apple_id and worker.context is not None:
+            if not worker.logged_in and not worker.apple_id and worker.context is not None:
                 try:
                     await worker.refresh_account()
                 except Exception as exc:
                     hub.warn(worker.profile.name, f"檢查登入狀態失敗：{exc}")
-            if worker.apple_id:
+            if worker.logged_in or worker.apple_id:
                 ready.append(worker)
             else:
-                hub.warn(worker.profile.name, "尚未登入 Apple ID，全域啟動會跳過此 Worker")
+                pending.append(worker.profile.name)
 
-        if not ready:
-            raise EngineError("尚未有 Worker 完成 Apple ID 登入。請先撳「登入 Apple ID」，登入成功變成待命後再全域啟動。", 409)
+        if pending:
+            names = "、".join(pending)
+            raise EngineError(
+                f"仲有 Worker 未登入 Apple ID：{names}。請登入或刪除未登入嘅 Worker，先至可以全部開始搶機。",
+                409,
+            )
 
         for worker in ready:
             try:
@@ -143,7 +149,7 @@ class BotManager:
 
         self._refresh_running()
         await self.bring_all_to_front()
-        hub.success("system", f"已開始 {sum(1 for worker in ready if worker.sniping)} 個已登入 Worker 搶購")
+        hub.success("system", f"已開始 {sum(1 for worker in ready if worker.sniping)} 個 Worker 搶購")
         return self.status()
 
     async def bring_all_to_front(self) -> None:

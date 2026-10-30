@@ -29,8 +29,8 @@ def test_catalog_lists_hk_stores_and_duo_skus(client) -> None:
 def test_index_and_frontend_assets(client) -> None:
     page = client.get("/")
     assert page.status_code == 200
-    assert "全域啟動 (Start)" in page.text
-    assert "緊急停止所有 Bot (Emergency Stop)" in page.text
+    assert "全部開始搶機" in page.text
+    assert "緊急停止所有 Bot" in page.text
     js = client.get("/static/js/app.js")
     assert js.status_code == 200
     assert "警告：您目前未開啟測試模式，系統啟動後若偵測到有貨將會進行真實的信用卡扣款與下單！請問是否確定要啟動？" in js.text
@@ -40,19 +40,21 @@ def test_index_and_frontend_assets(client) -> None:
     assert "待命（已登入）" in js.text
     assert "登入 Apple ID" in js.text
     assert "開始運作" in js.text
-    assert "停止運作" in js.text
-    assert "儲存設定" in page.text
+    assert "暫停運作" in js.text
+    assert "儲存此 Worker" in js.text
+    assert "collapse-toggle" in js.text
     assert "初次設定流程" in page.text
-    assert "搶夠上限會自動停" in page.text
-    assert "複製做新 Apple ID" in js.text
+    assert "全部開始搶機" in page.text
+    assert "複製設定（另一個 Apple ID）" not in js.text
+    assert "繼續呢個" not in js.text
+    assert "瀏覽器已關閉（已停搶）" in js.text
     assert "mountWorker" in js.text
     preview = Path("preview.html").read_text()
     assert 'href="static/css/app.css"' in preview
     assert 'src="static/js/app.js"' in preview
     assert "預覽模式" in preview
-    assert "儲存設定" in preview
+    assert "儲存此 Worker" in preview
     assert "加入此 SKU" in js.text
-    assert "複製做新 Apple ID" in js.text
     assert "初次設定流程" in preview
 
 
@@ -113,11 +115,8 @@ def test_login_then_individual_run_pause_and_global_start(client) -> None:
         "session_dir": "session_worker_2",
     }
     mixed = client.post("/api/start", json={"test_mode": True, "workers": [SAMPLE_WORKER, other]})
-    assert mixed.status_code == 200, mixed.text
-    by_id = {item["id"]: item for item in mixed.json()["workers"]}
-    assert by_id["w1"]["sniping"] is True
-    assert by_id["w2"]["sniping"] is False
-    assert by_id["w2"]["logged_in"] is False
+    assert mixed.status_code == 409
+    assert "Worker_2" in mixed.json()["detail"]
 
     focused = client.post("/api/workers/w1/focus")
     assert focused.status_code == 200
@@ -126,6 +125,26 @@ def test_login_then_individual_run_pause_and_global_start(client) -> None:
     stopped = client.post("/api/stop")
     assert stopped.status_code == 200
     assert stopped.json()["running"] is False
+
+
+def test_closing_browser_stops_that_worker(client) -> None:
+    payload = {"test_mode": True, "worker": SAMPLE_WORKER}
+    client.post("/api/workers/login", json=payload)
+    client.post("/api/workers/run", json=payload)
+    worker = manager.workers["w1"]
+    worker.mark_browser_closed()
+    status = client.get("/api/status").json()
+    body = status["workers"][0]
+    assert body["status"] == "browser_closed"
+    assert body["sniping"] is False
+    assert body["logged_in"] is True
+    assert "手動關閉" in body["last_message"]
+    assert status["running"] is False
+
+    resumed = client.post("/api/workers/run", json=payload)
+    assert resumed.status_code == 200
+    assert resumed.json()["workers"][0]["sniping"] is True
+    client.post("/api/stop")
 
 
 def test_live_mode_is_backend_accepted_without_server_side_confirm(client) -> None:

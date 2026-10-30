@@ -23,6 +23,7 @@ class DummyWorker:
         self.purchased = 0
         self.last_message = ""
         self.apple_id = None
+        self.logged_in = False
         self.sniping = False
         self.context = None
         self.ready_event = asyncio.Event()
@@ -45,7 +46,7 @@ class DummyWorker:
             "status": self.status,
             "last_message": self.last_message,
             "apple_id": self.apple_id,
-            "logged_in": bool(self.apple_id),
+            "logged_in": bool(self.logged_in or self.apple_id),
             "sniping": self.sniping,
             "browser_open": self.context is not None,
         }
@@ -60,14 +61,15 @@ class DummyWorker:
     async def open_login(self) -> None:
         await self.ensure_browser()
         self.apple_id = "tester@icloud.com"
+        self.logged_in = True
         self.status = "ready"
         self.last_message = "已登入 Apple ID：tester@icloud.com"
         self.focused += 1
 
     async def start_sniping(self) -> None:
-        await self.ensure_browser()
-        if not self.apple_id:
+        if not self.logged_in and not self.apple_id:
             raise RuntimeError("尚未登入 Apple ID，不能開始搶機")
+        await self.ensure_browser()
         self.sniping = True
         self.status = "watching"
         self.last_message = "dummy watching"
@@ -75,7 +77,14 @@ class DummyWorker:
 
     async def stop_sniping(self) -> None:
         self.sniping = False
-        self.status = "ready" if self.apple_id else "needs_login"
+        self.status = "ready" if (self.logged_in or self.apple_id) else "needs_login"
+        self.last_message = "已暫停搶購。撳「開始運作」即可再搶。"
+
+    def mark_browser_closed(self) -> None:
+        self.context = None
+        self.sniping = False
+        self.status = "browser_closed"
+        self.last_message = "你手動關閉咗呢個 Worker 嘅瀏覽器，已自動停止搶購。"
 
     async def run(self) -> None:
         await self.start_sniping()
