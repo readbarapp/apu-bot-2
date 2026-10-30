@@ -166,7 +166,7 @@ class Worker:
         if was_sniping:
             message = (
                 "你手動關閉咗呢個 Worker 嘅瀏覽器，已自動停止搶購。"
-                "登入資料仍保存在 session 資料夾。要再搶請撳「繼續呢個」，系統會重新打開瀏覽器。"
+                "登入資料仍保存在 session 資料夾。要再搶請撳「開始運作」，系統會重新打開瀏覽器。"
             )
         else:
             message = (
@@ -227,7 +227,7 @@ class Worker:
         await self.refresh_account()
         if self.logged_in:
             label = self.apple_id or "已登入"
-            self._set("ready", f"已登入 Apple ID：{label}。待命中，撳「全部開始搶機」或「繼續呢個」。")
+            self._set("ready", f"已登入 Apple ID：{label}。待命中，撳「全部開始搶機」或「開始運作」。")
         else:
             self._set("needs_login", "瀏覽器已開，尚未登入 Apple ID。請撳「登入 Apple ID」。")
 
@@ -253,7 +253,7 @@ class Worker:
             self.logged_in = False
         if self.logged_in and self.status in {"needs_login", "logging_in", "idle", "launching"} and not self.sniping:
             label = self.apple_id or "已登入"
-            self._set("ready", f"已登入 Apple ID：{label}。待命中，撳「全部開始搶機」或「繼續呢個」。")
+            self._set("ready", f"已登入 Apple ID：{label}。待命中，撳「全部開始搶機」或「開始運作」。")
         return self.apple_id
 
     async def open_login(self) -> None:
@@ -322,7 +322,7 @@ class Worker:
         await self._cancel_snipe()
         if self.logged_in or self.apple_id:
             label = self.apple_id or "已登入"
-            self._set("ready", f"已暫停搶購。Apple ID {label} 仍然登入，撳「繼續呢個」即可再搶。")
+            self._set("ready", f"已暫停搶購。Apple ID {label} 仍然登入，撳「開始運作」即可再搶。")
         else:
             self._set("needs_login", "已暫停搶購，尚未登入 Apple ID。")
 

@@ -20,12 +20,12 @@
     </header>
 
     <ol class="flow" aria-label="初次設定流程">
-      <li><strong>1. 設定 Worker</strong>揀機型、門市、數量。一個 Worker = 一個 Apple ID，用唔同 session 資料夾。</li>
-      <li><strong>2. 儲存設定</strong>撳綠色「儲存設定」。全部開始搶機只會用已儲存嘅 Worker。</li>
-      <li><strong>3. 每個都要登入</strong>撳「登入 Apple ID」，視窗會帶到最前。全部登入好先至可以撳綠色大掣。</li>
-      <li><strong>4. 全部開始搶機</strong>綠色大掣一次過開全部。之後用每張卡嘅「暫停呢個／繼續呢個」單獨控制。手動關瀏覽器會自動停嗰個。</li>
+      <li><strong>1. 設定 Worker</strong>每個 Worker 搶一個 SKU、用一個 Apple ID。揀機型、門市、數量後撳該卡嘅「儲存此 Worker」。</li>
+      <li><strong>2. 登入 Apple ID</strong>每張卡撳「登入 Apple ID」。全部登入好先至可以撳綠色大掣。</li>
+      <li><strong>3. 全部開始搶機</strong>綠色大掣一次過開全部。單個用「開始運作／暫停運作」。運作中唔可以改設定。</li>
+      <li><strong>4. 暫停先至可以改</strong>要改機型或門市，先暫停運作。手動關瀏覽器會自動停嗰個，再撳「開始運作」可重開。</li>
     </ol>
-    <div id="run-lock" class="run-lock" hidden>有 Worker 正在搶機：嗰粒嘅設定已鎖定。其他 Worker 仍可用「暫停呢個／繼續呢個」。緊急停止會關閉全部瀏覽器。</div>
+    <div id="run-lock" class="run-lock" hidden>有 Worker 正在搶機：嗰粒嘅所有設定已鎖定。要改資料請先「暫停運作」。緊急停止會關閉全部瀏覽器。</div>
 
     <section class="global" aria-label="全域控制面板">
       <div class="global-copy">
@@ -41,7 +41,7 @@
       </label>
       <div class="global-actions">
         <button type="button" id="btn-start" class="btn go" disabled>全部開始搶機</button>
-        <p id="start-hint" class="start-hint blocked">請先儲存設定，並讓每個 Worker 登入 Apple ID。</p>
+        <p id="start-hint" class="start-hint blocked">請先喺每張卡撳「儲存此 Worker」，並登入 Apple ID。</p>
         <button type="button" id="btn-stop" class="btn danger" disabled>緊急停止所有 Bot</button>
       </div>
     </section>
@@ -51,14 +51,13 @@
         <div class="panel-head">
           <div>
             <h2>Worker Profiles</h2>
-            <p>每張卡只控制自己：登入、暫停、繼續。要一次過全部開搶，用上面綠色大掣。</p>
+            <p>每張卡自己儲存、自己登入、自己開始／暫停。運作中設定會鎖死。要一次過全部開搶，用上面綠色大掣。</p>
           </div>
           <div class="panel-actions">
-            <button type="button" id="btn-save" class="btn save">儲存設定</button>
             <button type="button" id="btn-add" class="btn add">新增 Worker</button>
           </div>
         </div>
-        <p id="save-hint" class="save-hint dirty">尚未儲存。請先按「儲存設定」，再讓每個 Worker 登入 Apple ID。</p>
+        <p id="save-hint" class="save-hint dirty">每個 Worker 要喺自己張卡撳「儲存此 Worker」。</p>
         <div id="worker-list" class="worker-list"></div>
       </section>
 

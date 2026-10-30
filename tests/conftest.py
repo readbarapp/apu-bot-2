@@ -78,7 +78,7 @@ class DummyWorker:
     async def stop_sniping(self) -> None:
         self.sniping = False
         self.status = "ready" if (self.logged_in or self.apple_id) else "needs_login"
-        self.last_message = "已暫停搶購。撳「繼續呢個」即可再搶。"
+        self.last_message = "已暫停搶購。撳「開始運作」即可再搶。"
 
     def mark_browser_closed(self) -> None:
         self.context = None

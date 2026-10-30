@@ -6,6 +6,7 @@
   const STORAGE_SAVED = "hkIphoneBot.savedProfiles";
   const STORAGE_SKUS = "hkIphoneBot.extraSkus";
   const STORAGE_MODE = "hkIphoneBot.testMode";
+  const STORAGE_COLLAPSED = "hkIphoneBot.collapsed";
   const PREVIEW_ALERT = "而家係預覽模式：新增／刪除 Worker、改機型、加 SKU、儲存設定都可以試。真正開瀏覽器搶購，請用 Python 開後台後打開 http://127.0.0.1:8765";
   const STATUS_LABELS = {
     idle: "未登入 Apple ID",
@@ -137,31 +138,88 @@
     }));
   }
 
+  function profileOf(worker) {
+    return {
+      id: worker.id,
+      name: worker.name,
+      session_dir: worker.session_dir,
+      sku: worker.sku,
+      stores: worker.stores,
+      pickup_window: worker.pickup_window,
+      max_qty: worker.max_qty,
+    };
+  }
+
+  function savedProfile(id) {
+    return (state.savedWorkers || []).find((item) => item.id === id);
+  }
+
+  function isDirty(worker) {
+    const saved = savedProfile(worker.id);
+    if (!saved) return true;
+    return JSON.stringify(profileOf(worker)) !== JSON.stringify(saved);
+  }
+
+  function unsavedWorkers() {
+    return state.workers.filter(isDirty);
+  }
+
+  function collapsedSet() {
+    return new Set(loadJson(STORAGE_COLLAPSED, []));
+  }
+
+  function setCollapsed(id, collapsed) {
+    const ids = collapsedSet();
+    if (collapsed) ids.add(id);
+    else ids.delete(id);
+    saveJson(STORAGE_COLLAPSED, [...ids]);
+  }
+
   function persistDraft() {
     saveJson(STORAGE_PROFILES, serializeWorkers(state.workers));
     saveJson(STORAGE_SKUS, state.extraSkus);
     localStorage.setItem(STORAGE_MODE, els.testMode.checked ? "1" : "0");
   }
 
+  function updateCardSaveState(worker) {
+    const card = els.list.querySelector(`[data-id="${CSS.escape(worker.id)}"]`);
+    if (!card) return;
+    const dirty = isDirty(worker);
+    const sniping = Boolean(worker.sniping);
+    const hint = card.querySelector(".save-hint-one");
+    const button = card.querySelector(".save-one");
+    if (button) button.disabled = sniping || !dirty;
+    if (!hint) return;
+    if (sniping) {
+      hint.className = "save-hint-one locked";
+      hint.textContent = "運作中已鎖定。請先「暫停運作」先至可以改同儲存。";
+      return;
+    }
+    if (dirty) {
+      hint.className = "save-hint-one dirty";
+      hint.textContent = "此 Worker 有未儲存變更。";
+      return;
+    }
+    hint.className = "save-hint-one saved";
+    hint.textContent = "此 Worker 已儲存。";
+  }
+
   function updateSaveHint() {
-    if (!els.saveHint) return;
-    const current = JSON.stringify(serializeWorkers(state.workers));
-    const saved = JSON.stringify(state.savedWorkers || []);
-    state.dirty = current !== saved;
-    if (!(state.savedWorkers && state.savedWorkers.length)) {
-      els.saveHint.className = "save-hint dirty";
-      els.saveHint.textContent = "尚未儲存。請先按綠色「儲存設定」，再讓每個 Worker 登入 Apple ID。";
-      updateStartGate();
-      return;
+    const unsaved = unsavedWorkers();
+    state.dirty = unsaved.length > 0;
+    if (els.saveHint) {
+      if (!state.workers.length) {
+        els.saveHint.className = "save-hint dirty";
+        els.saveHint.textContent = "請新增 Worker，並喺該卡撳「儲存此 Worker」。";
+      } else if (unsaved.length) {
+        els.saveHint.className = "save-hint dirty";
+        els.saveHint.textContent = `仲有 ${unsaved.length} 個未儲存：${unsaved.map((item) => item.name || "未命名").join("、")}。請喺該卡撳「儲存此 Worker」。`;
+      } else {
+        els.saveHint.className = "save-hint saved";
+        els.saveHint.textContent = `全部 ${state.workers.length} 個 Worker 已各自儲存。`;
+      }
     }
-    if (state.dirty) {
-      els.saveHint.className = "save-hint dirty";
-      els.saveHint.textContent = "有未儲存變更。請先按「儲存設定」，否則不能全部開始搶機。";
-      updateStartGate();
-      return;
-    }
-    els.saveHint.className = "save-hint saved";
-    els.saveHint.textContent = `已儲存 ${state.savedWorkers.length} 個 Worker。全部開始搶機只會用呢份設定。`;
+    state.workers.forEach(updateCardSaveState);
     updateStartGate();
   }
 
@@ -169,8 +227,19 @@
     const cards = [...els.list.querySelectorAll(".worker-card")];
     if (!cards.length) return;
     state.workers = cards.map((card) => {
-      const stores = [...card.querySelectorAll(".store:checked")].map((box) => box.value);
       const prev = state.workers.find((item) => item.id === card.dataset.id) || {};
+      const sniping = card.dataset.sniping === "true" || Boolean(prev.sniping);
+      if (sniping) {
+        return {
+          ...prev,
+          id: card.dataset.id,
+          status: card.dataset.status || prev.status || "watching",
+          last_message: card.dataset.message || prev.last_message || "",
+          purchased: Number(card.dataset.purchased || prev.purchased || 0),
+          sniping: true,
+        };
+      }
+      const stores = [...card.querySelectorAll(".store:checked")].map((box) => box.value);
       return {
         id: card.dataset.id,
         name: card.querySelector(".name").value.trim(),
@@ -216,15 +285,20 @@
 
   function updateStartGate() {
     if (!els.start) return;
-    const unsaved = !(state.savedWorkers && state.savedWorkers.length) || state.dirty;
+    const unsaved = unsavedWorkers();
     const unlogged = unloggedWorkers();
     const allSniping = state.workers.length > 0 && state.workers.every((worker) => worker.sniping);
-    const blocked = unsaved || unlogged.length > 0 || allSniping;
+    const blocked = !state.workers.length || unsaved.length > 0 || unlogged.length > 0 || allSniping;
     els.start.disabled = blocked;
     if (!els.startHint) return;
-    if (unsaved) {
+    if (!state.workers.length) {
       els.startHint.className = "start-hint blocked";
-      els.startHint.textContent = "請先儲存設定，先至可以全部開始搶機。";
+      els.startHint.textContent = "請先新增並儲存 Worker。";
+      return;
+    }
+    if (unsaved.length) {
+      els.startHint.className = "start-hint blocked";
+      els.startHint.textContent = `請先喺未儲存嘅卡撳「儲存此 Worker」：${unsaved.map((item) => item.name || "未命名").join("、")}`;
       return;
     }
     if (unlogged.length) {
@@ -234,11 +308,11 @@
     }
     if (allSniping) {
       els.startHint.className = "start-hint ok";
-      els.startHint.textContent = "全部 Worker 已在搶機。要停某個請撳「暫停呢個」。";
+      els.startHint.textContent = "全部 Worker 已在搶機。要停某個請撳「暫停運作」。";
       return;
     }
     els.startHint.className = "start-hint ok";
-    els.startHint.textContent = `已登入 ${state.workers.length} 個 Worker，可以全部開始搶機。單個暫停／繼續用每張卡下面嘅掣。`;
+    els.startHint.textContent = `已登入 ${state.workers.length} 個 Worker，可以全部開始搶機。單個用「開始運作／暫停運作」。`;
   }
 
   function setRunning(running, testMode) {
@@ -246,24 +320,26 @@
     updateStartGate();
     els.stop.disabled = !running && !anyBrowserOpen();
     els.add.disabled = false;
-    if (els.save) els.save.disabled = false;
     els.testMode.disabled = false;
     if (els.workersPanel) els.workersPanel.classList.toggle("is-running", running);
     if (els.runLock) els.runLock.hidden = !running;
     els.list.querySelectorAll(".worker-card").forEach((card) => {
       const sniping = card.dataset.sniping === "true";
+      const loggedIn = card.dataset.loggedIn === "true";
+      const worker = state.workers.find((item) => item.id === card.dataset.id);
       card.classList.toggle("is-sniping", sniping);
-      card.querySelectorAll("input, select, button.add-sku, button.remove, button.clone").forEach((node) => {
+      card.querySelectorAll("input, select, button.add-sku, button.remove").forEach((node) => {
         node.disabled = sniping;
       });
-      const loggedIn = card.dataset.loggedIn === "true";
+      if (worker) updateCardSaveState(worker);
       const runBtn = card.querySelector(".run-one");
       const pauseBtn = card.querySelector(".pause-one");
       const loginBtn = card.querySelector(".login");
       const focusBtn = card.querySelector(".focus");
-      if (runBtn) runBtn.disabled = !loggedIn || sniping;
+      const saved = worker ? !isDirty(worker) : false;
+      if (runBtn) runBtn.disabled = !loggedIn || sniping || !saved;
       if (pauseBtn) pauseBtn.disabled = !sniping;
-      if (loginBtn) loginBtn.disabled = false;
+      if (loginBtn) loginBtn.disabled = sniping;
       if (focusBtn) focusBtn.disabled = false;
     });
     if (running && testMode === false) {
@@ -311,17 +387,29 @@
     const sniping = Boolean(worker.sniping);
     const loggedIn = Boolean(worker.logged_in || worker.apple_id);
     const closed = status === "browser_closed";
+    const collapsed = collapsedSet().has(worker.id);
     const email = worker.apple_id || "";
+    const saved = !isDirty(worker);
     const note = worker.last_message || (loggedIn
-      ? "已登入，等你撳上面綠色「全部開始搶機」，或呢張卡嘅「繼續呢個」。"
+      ? "已登入。可以撳「開始運作」或上面綠色「全部開始搶機」。"
       : "未登入。請先撳「登入 Apple ID」。");
     const sessionHint = `會儲存在專案資料夾 sessions/${worker.session_dir || "session_worker_1"}。Chromium 把 Apple ID cookie 寫入呢度，下次開同一個資料夾就記得登入。`;
+    const meta = `${worker.sku || "未揀 SKU"} · ${loggedIn ? (email || "已登入") : "未登入"}`;
     return `
-      <article class="worker-card${entering ? " enter" : ""}${sniping ? " is-sniping" : ""}${closed ? " is-closed" : ""}" data-id="${esc(worker.id)}" data-status="${esc(status)}" data-message="${esc(worker.last_message || "")}" data-purchased="${esc(worker.purchased || 0)}" data-sniping="${sniping}" data-logged-in="${loggedIn}">
+      <article class="worker-card${entering ? " enter" : ""}${sniping ? " is-sniping" : ""}${closed ? " is-closed" : ""}${collapsed ? " is-collapsed" : ""}" data-id="${esc(worker.id)}" data-status="${esc(status)}" data-message="${esc(worker.last_message || "")}" data-purchased="${esc(worker.purchased || 0)}" data-sniping="${sniping}" data-logged-in="${loggedIn}">
         <div class="worker-top">
-          <strong class="worker-title">${esc(worker.name)}</strong>
+          <button type="button" class="collapse-toggle" aria-expanded="${collapsed ? "false" : "true"}" aria-label="展開或收合 Worker">▾</button>
+          <div class="worker-heading">
+            <strong class="worker-title">${esc(worker.name)}</strong>
+            <p class="collapsed-meta">${esc(meta)}</p>
+          </div>
           <span class="badge ${esc(status)}">${esc(statusLabel(status))}${worker.purchased ? ` · ${worker.purchased}/${worker.max_qty}` : ""}</span>
+          <div class="worker-top-actions">
+            <button type="button" class="btn run-one" ${loggedIn && !sniping && saved ? "" : "disabled"}>開始運作</button>
+            <button type="button" class="btn pause-one" ${sniping ? "" : "disabled"}>暫停運作</button>
+          </div>
         </div>
+        <div class="worker-body">
         <div class="account-bar ${loggedIn ? "is-in" : "is-out"}">
           <span>Apple ID</span>
           <strong class="account-email">${loggedIn ? esc(email || "已登入") : "未登入"}</strong>
@@ -339,14 +427,14 @@
             <p class="help session-path">${esc(sessionHint)}</p>
           </label>
           <div class="field full sku-block">
-            <span>1. 目標機型（下拉選單揀 Duo 型號）</span>
+            <span>1. 目標機型（每個 Worker 只搶一個 SKU）</span>
             <select class="sku" aria-label="目標機型 SKU">${productOptions(worker.sku)}</select>
             <span>2. 或者輸入任何 Apple 產品 SKU 再加入選單</span>
             <div class="sku-add">
               <input class="sku-custom" type="text" placeholder="例如 MK2E4ZA/A" />
               <button type="button" class="btn add-sku">加入此 SKU</button>
             </div>
-            <p class="help">加入之後會出現喺上面嘅下拉選單，再揀佢做呢個 Worker 嘅目標機型。</p>
+            <p class="help">一個 Worker 同一時間只會監控同搶呢一個 SKU。要搶第二款，請新增另一個 Worker。</p>
           </div>
           <div class="field full">
             <span>香港指定門市（可複選）</span>
@@ -361,14 +449,15 @@
             <input class="qty" type="number" min="1" max="99" value="${esc(worker.max_qty)}" />
           </label>
         </div>
+        <div class="card-save">
+          <button type="button" class="btn save save-one" ${sniping || saved ? "disabled" : ""}>儲存此 Worker</button>
+          <p class="save-hint-one ${sniping ? "locked" : (saved ? "saved" : "dirty")}">${sniping ? "運作中已鎖定。請先「暫停運作」先至可以改同儲存。" : (saved ? "此 Worker 已儲存。" : "此 Worker 有未儲存變更。")}</p>
+        </div>
         <div class="card-actions">
-          <button type="button" class="btn run-one" ${loggedIn && !sniping ? "" : "disabled"}>繼續呢個</button>
-          <button type="button" class="btn pause-one" ${sniping ? "" : "disabled"}>暫停呢個</button>
           <button type="button" class="btn focus">顯示此 Worker 視窗</button>
-          <button type="button" class="btn clone">複製設定（另一個 Apple ID）</button>
           <button type="button" class="btn remove">刪除此 Worker</button>
         </div>
-        <p class="help">「複製設定（另一個 Apple ID）」用嚟加第二個帳戶搶同一部機：會複製機型／門市，但開全新空白 session，唔會郁到而家呢個已登入帳戶。</p>
+        </div>
       </article>
     `;
   }
@@ -419,18 +508,25 @@
       accountBar.classList.toggle("is-out", !loggedIn);
     }
     const loginBtn = card.querySelector(".login");
-    if (loginBtn) loginBtn.textContent = closed ? "重新打開瀏覽器" : (loggedIn ? "帶到最前" : "登入 Apple ID");
-    const runBtn = card.querySelector(".run-one");
-    const pauseBtn = card.querySelector(".pause-one");
-    if (runBtn) runBtn.disabled = !loggedIn || sniping;
-    if (pauseBtn) pauseBtn.disabled = !sniping;
+    if (loginBtn) {
+      loginBtn.textContent = closed ? "重新打開瀏覽器" : (loggedIn ? "帶到最前" : "登入 Apple ID");
+      loginBtn.disabled = sniping;
+    }
     const note = card.querySelector(".worker-note");
     if (note) {
       note.classList.toggle("warn", closed);
       note.textContent = worker.last_message || (loggedIn
-        ? "已登入，等你撳上面綠色「全部開始搶機」，或呢張卡嘅「繼續呢個」。"
+        ? "已登入。可以撳「開始運作」或上面綠色「全部開始搶機」。"
         : "未登入。請先撳「登入 Apple ID」。");
     }
+    const meta = card.querySelector(".collapsed-meta");
+    if (meta) meta.textContent = `${worker.sku || "未揀 SKU"} · ${loggedIn ? (worker.apple_id || "已登入") : "未登入"}`;
+    const runBtn = card.querySelector(".run-one");
+    const pauseBtn = card.querySelector(".pause-one");
+    const saved = !isDirty(worker);
+    if (runBtn) runBtn.disabled = !loggedIn || sniping || !saved;
+    if (pauseBtn) pauseBtn.disabled = !sniping;
+    updateCardSaveState(worker);
   }
 
   function refreshSkuDropdowns(selectId, sku) {
@@ -502,31 +598,52 @@
     });
   }
 
-  function saveSettings() {
-    readCardsIntoState();
-    for (const worker of state.workers) {
-      if (!worker.name || !worker.session_dir || !worker.sku || !worker.stores.length) {
-        window.alert("每個 Worker 都要有名稱、session 資料夾、目標機型，同至少一間香港門市。");
-        return false;
-      }
+  function saveOne(id) {
+    const card = els.list.querySelector(`[data-id="${CSS.escape(id)}"]`);
+    if (card && card.dataset.sniping === "true") {
+      window.alert("呢個 Worker 運作中，設定已鎖定。請先「暫停運作」再改同儲存。");
+      return false;
     }
-    state.savedWorkers = serializeWorkers(state.workers);
+    readCardsIntoState();
+    const worker = state.workers.find((item) => item.id === id);
+    if (!worker) return false;
+    if (worker.sniping) {
+      window.alert("呢個 Worker 運作中，設定已鎖定。請先「暫停運作」再改同儲存。");
+      return false;
+    }
+    if (!worker.name || !worker.session_dir || !worker.sku || !worker.stores.length) {
+      window.alert("此 Worker 要有名稱、session 資料夾、目標機型，同至少一間香港門市。");
+      return false;
+    }
+    const clash = state.savedWorkers.find((item) => item.id !== worker.id && item.session_dir === worker.session_dir);
+    const liveClash = state.workers.find((item) => item.id !== worker.id && item.session_dir === worker.session_dir);
+    if (clash || liveClash) {
+      window.alert("每個 Worker 要用唔同嘅 session 資料夾（一個資料夾 = 一個 Apple ID）。");
+      return false;
+    }
+    const profile = profileOf(worker);
+    const index = state.savedWorkers.findIndex((item) => item.id === worker.id);
+    if (index >= 0) state.savedWorkers[index] = profile;
+    else state.savedWorkers.push(profile);
+    state.savedWorkers = state.savedWorkers.filter((item) => state.workers.some((workerItem) => workerItem.id === item.id));
     saveJson(STORAGE_SAVED, state.savedWorkers);
     persistDraft();
     updateSaveHint();
     appendLog({
       ts: new Date().toISOString(),
-      worker: "frontend",
+      worker: worker.name,
       level: "success",
-      message: `已儲存 ${state.savedWorkers.length} 個 Worker 設定。全部開始搶機會用呢份設定。`,
+      message: "已儲存此 Worker 設定。",
     });
     return true;
   }
 
   async function start() {
     readCardsIntoState();
-    if (!state.savedWorkers.length || state.dirty) {
-      window.alert("請先喺 Worker Profiles 撳綠色「儲存設定」，再按全部開始搶機。");
+    const unsaved = unsavedWorkers();
+    if (unsaved.length) {
+      window.alert(`請先喺未儲存嘅卡撳「儲存此 Worker」：${unsaved.map((item) => item.name).join("、")}`);
+      updateStartGate();
       return;
     }
     const unlogged = unloggedWorkers();
@@ -561,7 +678,7 @@
         method: "POST",
         body: JSON.stringify({
           test_mode: els.testMode.checked,
-          workers: state.savedWorkers,
+          workers: serializeWorkers(state.workers),
         }),
       });
       applyStatus(data);
@@ -604,6 +721,17 @@
   }
 
   async function loginWorker(id) {
+    readCardsIntoState();
+    const current = state.workers.find((item) => item.id === id);
+    if (!current) return;
+    if (current.sniping) {
+      window.alert("呢個 Worker 運作中。請先「暫停運作」。");
+      return;
+    }
+    if (isDirty(current)) {
+      window.alert("請先撳「儲存此 Worker」，再登入 Apple ID。");
+      return;
+    }
     if (state.previewMode) {
       const worker = state.workers.find((item) => item.id === id);
       if (worker) {
@@ -633,9 +761,15 @@
   }
 
   async function runOne(id) {
+    readCardsIntoState();
     const worker = state.workers.find((item) => item.id === id);
-    if (!worker || !(worker.logged_in || worker.apple_id)) {
-      window.alert("請先撳「登入 Apple ID」，登入成功後先可以繼續呢個 Worker。");
+    if (!worker) return;
+    if (isDirty(worker)) {
+      window.alert("請先撳「儲存此 Worker」，再開始運作。");
+      return;
+    }
+    if (!(worker.logged_in || worker.apple_id)) {
+      window.alert("請先撳「登入 Apple ID」，登入成功後先可以開始運作。");
       return;
     }
     if (!els.testMode.checked && !window.confirm(LIVE_CONFIRM)) {
@@ -645,14 +779,14 @@
     if (state.previewMode) {
       worker.sniping = true;
       worker.status = "watching";
-        worker.last_message = "預覽模式：已繼續呢個 Worker。真正搶機請用 python app.py。";
+        worker.last_message = "預覽模式：已開始運作。真正搶機請用 python app.py。";
         patchWorkerStatus(worker);
         setRunning(true, els.testMode.checked);
         appendLog({
           ts: new Date().toISOString(),
           worker: worker.name,
           level: "success",
-          message: "預覽模式：已模擬繼續呢個 Worker。",
+          message: "預覽模式：已模擬開始運作。",
         });
       return;
     }
@@ -672,7 +806,7 @@
       if (worker) {
         worker.sniping = false;
         worker.status = worker.logged_in || worker.apple_id ? "ready" : "needs_login";
-        worker.last_message = "預覽模式：已暫停呢個 Worker。撳「繼續呢個」即可再搶。";
+        worker.last_message = "預覽模式：已暫停運作。撳「開始運作」即可再搶。";
         patchWorkerStatus(worker);
       }
       setRunning(state.workers.some((item) => item.sniping), els.testMode.checked);
@@ -680,7 +814,7 @@
         ts: new Date().toISOString(),
         worker: worker ? worker.name : "frontend",
         level: "info",
-        message: "預覽模式：已模擬暫停。登入狀態仍然保留，撳「繼續呢個」即可再搶。",
+        message: "預覽模式：已模擬暫停。登入狀態仍然保留，撳「開始運作」即可再搶。",
       });
       return;
     }
@@ -730,6 +864,14 @@
   els.list.addEventListener("click", (event) => {
     const card = event.target.closest(".worker-card");
     if (!card) return;
+    if (event.target.closest(".collapse-toggle")) {
+      const collapsed = !card.classList.contains("is-collapsed");
+      card.classList.toggle("is-collapsed", collapsed);
+      const toggle = card.querySelector(".collapse-toggle");
+      if (toggle) toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      setCollapsed(card.dataset.id, collapsed);
+      return;
+    }
     if (event.target.closest(".login")) {
       loginWorker(card.dataset.id);
       return;
@@ -742,6 +884,10 @@
       pauseOne(card.dataset.id);
       return;
     }
+    if (event.target.closest(".save-one")) {
+      saveOne(card.dataset.id);
+      return;
+    }
     if (event.target.closest(".remove")) {
       if (card.dataset.sniping === "true") return;
       const remaining = state.workers.filter((worker) => worker.id !== card.dataset.id);
@@ -751,6 +897,8 @@
         closed = true;
         if (card.parentNode) card.remove();
         state.workers = remaining.length ? remaining : [defaultWorker(0)];
+        state.savedWorkers = state.savedWorkers.filter((item) => state.workers.some((worker) => worker.id === item.id));
+        saveJson(STORAGE_SAVED, state.savedWorkers);
         persistDraft();
         if (!remaining.length) mountWorker(state.workers[0]);
         updateSaveHint();
@@ -760,37 +908,11 @@
       card.addEventListener("animationend", finish, { once: true });
       window.setTimeout(finish, 280);
     }
-    if (event.target.closest(".clone")) {
-      if (card.dataset.sniping === "true") return;
-      readCardsIntoState();
-      const source = state.workers.find((item) => item.id === card.dataset.id);
-      if (!source) return;
-      const copy = {
-        ...source,
-        id: uid(),
-        name: `${source.name}_new`,
-        session_dir: `session_${Date.now()}`,
-        status: "needs_login",
-        purchased: 0,
-        last_message: "",
-        apple_id: "",
-        logged_in: false,
-        sniping: false,
-      };
-      state.workers.push(copy);
-      persistDraft();
-      mountWorker(copy);
-      appendLog({
-        ts: new Date().toISOString(),
-        worker: copy.name,
-        level: "info",
-        message: `已複製機型／門市到新 Worker，session「${copy.session_dir}」係全新空白登入。舊帳戶唔會被改。請儲存，再喺新 Worker 登入第二個 Apple ID。`,
-      });
-    }
     if (event.target.closest(".focus")) {
       focusWorker(card.dataset.id);
     }
     if (event.target.closest(".add-sku")) {
+      if (card.dataset.sniping === "true") return;
       const raw = card.querySelector(".sku-custom").value.trim().toUpperCase();
       if (!raw) {
         window.alert("請先輸入 SKU，例如 MK2E4ZA/A");
@@ -807,14 +929,13 @@
         ts: new Date().toISOString(),
         worker: worker ? worker.name : "frontend",
         level: "success",
-        message: `已加入 SKU ${raw}，並設為呢個 Worker 嘅目標機型。請記得按「儲存設定」。`,
+        message: `已加入 SKU ${raw}，並設為呢個 Worker 嘅目標機型。請記得撳「儲存此 Worker」。`,
       });
     }
   });
 
   els.start.addEventListener("click", start);
   els.stop.addEventListener("click", stop);
-  if (els.save) els.save.addEventListener("click", saveSettings);
   els.add.addEventListener("click", () => {
     readCardsIntoState();
     const worker = defaultWorker(state.workers.length);

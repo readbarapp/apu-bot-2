@@ -39,21 +39,22 @@ def test_index_and_frontend_assets(client) -> None:
     assert "STATUS_LABELS" in js.text
     assert "待命（已登入）" in js.text
     assert "登入 Apple ID" in js.text
-    assert "繼續呢個" in js.text
-    assert "暫停呢個" in js.text
-    assert "儲存設定" in page.text
+    assert "開始運作" in js.text
+    assert "暫停運作" in js.text
+    assert "儲存此 Worker" in js.text
+    assert "collapse-toggle" in js.text
     assert "初次設定流程" in page.text
     assert "全部開始搶機" in page.text
-    assert "複製設定（另一個 Apple ID）" in js.text
+    assert "複製設定（另一個 Apple ID）" not in js.text
+    assert "繼續呢個" not in js.text
     assert "瀏覽器已關閉（已停搶）" in js.text
     assert "mountWorker" in js.text
     preview = Path("preview.html").read_text()
     assert 'href="static/css/app.css"' in preview
     assert 'src="static/js/app.js"' in preview
     assert "預覽模式" in preview
-    assert "儲存設定" in preview
+    assert "儲存此 Worker" in preview
     assert "加入此 SKU" in js.text
-    assert "複製設定（另一個 Apple ID）" in js.text
     assert "初次設定流程" in preview
 
 
