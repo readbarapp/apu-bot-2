@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>香港 iPhone 自動搶購控制台（預覽）</title>
+  <link rel="stylesheet" href="static/css/app.css" />
+</head>
+<body>
+  <div class="shell">
+    <div id="preview-banner" class="preview-banner">
+      預覽模式：而家只可以睇控制台個樣、新增 Worker、撳掣試吓。真正搶購／開瀏覽器要先用 Python 開後台，然後打開 http://127.0.0.1:8765
+    </div>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Hong Kong · Apple Store Pickup</p>
+        <h1>iPhone 自動搶購控制台</h1>
+      </div>
+      <div id="run-pill" class="pill idle">預覽 · 後台未啟動</div>
+    </header>
+
+    <section class="global" aria-label="全域控制面板">
+      <div class="global-copy">
+        <h2>全域控制面板</h2>
+        <p>由本頁啟動、傳遞 Worker 設定、聚焦視窗與緊急停止。後台不會自行開跑。</p>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="test-mode" checked />
+        <span>
+          測試模式 (Test Mode / Dry Run)
+          <small id="mode-hint">開啟時偵測到貨源會停在最後一步，不會扣款。</small>
+        </span>
+      </label>
+      <div class="global-actions">
+        <button type="button" id="btn-start" class="btn primary">全域啟動 (Start)</button>
+        <button type="button" id="btn-stop" class="btn danger" disabled>緊急停止所有 Bot (Emergency Stop)</button>
+      </div>
+    </section>
+
+    <div class="layout">
+      <section class="panel workers" aria-label="Worker Profiles">
+        <div class="panel-head">
+          <div>
+            <h2>Worker Profiles</h2>
+            <p>每個 Worker 使用獨立瀏覽器與 Apple ID session。</p>
+          </div>
+          <button type="button" id="btn-add" class="btn ghost">新增 Worker</button>
+        </div>
+        <div id="worker-list"></div>
+      </section>
+
+      <section class="panel logs" aria-label="Live Logs">
+        <div class="panel-head">
+          <div>
+            <h2>Live Logs</h2>
+            <p>即時接收各 Worker 狀態。</p>
+          </div>
+          <button type="button" id="btn-clear-logs" class="btn ghost">清除畫面</button>
+        </div>
+        <div id="log-stream" class="log-stream" role="log" aria-live="polite"></div>
+      </section>
+    </div>
+  </div>
+  <script src="static/js/app.js"></script>
+</body>
+</html>

@@ -5,6 +5,32 @@
   const STORAGE_PROFILES = "hkIphoneBot.profiles";
   const STORAGE_SKUS = "hkIphoneBot.extraSkus";
   const STORAGE_MODE = "hkIphoneBot.testMode";
+  const PREVIEW_ALERT = "而家係預覽模式，只可以睇控制台個樣。要真正啟動 Bot，請先按照 README 用 Python 開後台，然後用瀏覽器打開 http://127.0.0.1:8765";
+  const FALLBACK_CATALOG = {
+    stores: [
+      { id: "R428", name: "ifc mall", area: "中環" },
+      { id: "R409", name: "Hysan Place", area: "銅鑼灣" },
+      { id: "R499", name: "Canton Road", area: "尖沙咀" },
+      { id: "R485", name: "Festival Walk", area: "九龍塘" },
+      { id: "R673", name: "apm Hong Kong", area: "觀塘" },
+      { id: "R610", name: "New Town Plaza", area: "沙田" },
+    ],
+    products: [
+      { sku: "MK2D4ZA/A", label: "iPhone Duo 256GB 星光白色" },
+      { sku: "MK2E4ZA/A", label: "iPhone Duo 256GB 夜空色" },
+      { sku: "MK2F4ZA/A", label: "iPhone Duo 512GB 星光白色" },
+      { sku: "MK2G4ZA/A", label: "iPhone Duo 512GB 夜空色" },
+      { sku: "MK2H4ZA/A", label: "iPhone Duo 1TB 星光白色" },
+      { sku: "MK2J4ZA/A", label: "iPhone Duo 1TB 夜空色" },
+      { sku: "MK2K4ZA/A", label: "iPhone Duo 2TB 星光白色" },
+      { sku: "MK2L4ZA/A", label: "iPhone Duo 2TB 夜空色" },
+    ],
+    pickup_windows: [
+      { id: "1d", label: "一日內" },
+      { id: "2d", label: "兩日內" },
+      { id: "3d", label: "三日內" },
+    ],
+  };
 
   const els = {
     testMode: document.getElementById("test-mode"),
@@ -24,6 +50,7 @@
     workers: [],
     running: false,
     stickLogs: true,
+    previewMode: false,
   };
 
   function loadJson(key, fallback) {
@@ -127,6 +154,9 @@
     } else if (running) {
       els.pill.className = "pill running";
       els.pill.textContent = "運行中 · 測試模式";
+    } else if (state.previewMode) {
+      els.pill.className = "pill idle";
+      els.pill.textContent = "預覽 · 後台未啟動";
     } else {
       els.pill.className = "pill idle";
       els.pill.textContent = "未啟動 · 等待前端指令";
@@ -246,7 +276,26 @@
     }
   }
 
+  function enterPreviewMode(reason) {
+    state.previewMode = true;
+    state.catalog = FALLBACK_CATALOG;
+    const banner = document.getElementById("preview-banner");
+    if (banner) banner.hidden = false;
+    els.pill.className = "pill idle";
+    els.pill.textContent = "預覽 · 後台未啟動";
+    appendLog({
+      ts: new Date().toISOString(),
+      worker: "frontend",
+      level: "warn",
+      message: reason || "未連到後台，已切換為預覽模式（只睇 UI，唔會開瀏覽器、唔會下單）",
+    });
+  }
+
   async function start() {
+    if (state.previewMode) {
+      window.alert(PREVIEW_ALERT);
+      return;
+    }
     readCardsIntoState();
     if (!els.testMode.checked && !window.confirm(LIVE_CONFIRM)) {
       appendLog({ ts: new Date().toISOString(), worker: "frontend", level: "warn", message: "使用者取消真實下單啟動" });
@@ -275,6 +324,10 @@
   }
 
   async function stop() {
+    if (state.previewMode) {
+      window.alert(PREVIEW_ALERT);
+      return;
+    }
     try {
       const data = await api("/api/stop", { method: "POST" });
       applyStatus(data);
@@ -284,6 +337,10 @@
   }
 
   async function focusWorker(id) {
+    if (state.previewMode) {
+      window.alert(PREVIEW_ALERT);
+      return;
+    }
     try {
       await api(`/api/workers/${encodeURIComponent(id)}/focus`, { method: "POST" });
     } catch (err) {
@@ -292,6 +349,9 @@
   }
 
   function connectLogs() {
+    if (state.previewMode || location.protocol === "file:") {
+      return;
+    }
     const protocol = location.protocol === "https:" ? "wss" : "ws";
     const socket = new WebSocket(`${protocol}://${location.host}/ws/logs`);
     socket.addEventListener("message", (event) => {
@@ -361,16 +421,34 @@
   });
 
   async function boot() {
-    state.catalog = await api("/api/catalog");
     const saved = loadJson(STORAGE_PROFILES, []);
     state.workers = saved.length ? saved : [defaultWorker(0)];
     els.testMode.checked = localStorage.getItem(STORAGE_MODE) !== "0";
     modeHint();
+
+    if (location.protocol === "file:") {
+      enterPreviewMode("你而家係直接打開 HTML 檔案（預覽模式）。");
+      renderWorkers();
+      return;
+    }
+
+    try {
+      state.catalog = await api("/api/catalog");
+    } catch {
+      enterPreviewMode("連唔到後台 API，已切換為預覽模式。");
+      renderWorkers();
+      return;
+    }
+
     renderWorkers();
     connectLogs();
-    const status = await api("/api/status");
-    applyStatus(status);
+    try {
+      applyStatus(await api("/api/status"));
+    } catch {
+      /* first status poll is optional */
+    }
     setInterval(async () => {
+      if (state.previewMode) return;
       try {
         applyStatus(await api("/api/status"));
       } catch {
@@ -380,6 +458,7 @@
   }
 
   boot().catch((err) => {
-    appendLog({ ts: new Date().toISOString(), worker: "frontend", level: "error", message: err.message });
+    enterPreviewMode(err.message);
+    renderWorkers();
   });
 })();
