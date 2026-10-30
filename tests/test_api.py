@@ -55,7 +55,17 @@ def test_index_and_frontend_assets(client) -> None:
     assert "預覽模式" in preview
     assert "儲存此 Worker" in preview
     assert "加入此 SKU" in js.text
+    assert "sku-label" in js.text
+    assert "confirmLiveStart" in js.text
     assert "初次設定流程" in preview
+
+
+def test_live_confirm_runs_before_global_start() -> None:
+    js = Path("static/js/app.js").read_text()
+    start_fn = js.split("async function start()")[1].split("async function stop()")[0]
+    assert start_fn.index("confirmLiveStart") < start_fn.index("state.previewMode")
+    run_fn = js.split("async function runOne(")[1].split("async function pauseOne(")[0]
+    assert run_fn.index("confirmLiveStart") < run_fn.index("state.previewMode")
 
 
 def test_duplicate_session_dir_rejected(client) -> None:
