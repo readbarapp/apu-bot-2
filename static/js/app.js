@@ -18,6 +18,7 @@
     dry_run_paused: "測試完成（已停在最後一步）",
     completed: "已達數量上限",
     stopped: "已停止",
+    browser_closed: "瀏覽器已關閉（已停搶）",
     error: "發生錯誤",
   };
   const FALLBACK_CATALOG = {
@@ -59,6 +60,7 @@
     pill: document.getElementById("run-pill"),
     clearLogs: document.getElementById("btn-clear-logs"),
     runLock: document.getElementById("run-lock"),
+    startHint: document.getElementById("start-hint"),
     workersPanel: document.querySelector(".workers"),
   };
 
@@ -148,16 +150,19 @@
     state.dirty = current !== saved;
     if (!(state.savedWorkers && state.savedWorkers.length)) {
       els.saveHint.className = "save-hint dirty";
-      els.saveHint.textContent = "尚未儲存。請先按綠色「儲存設定」，再按藍色「全域啟動」。啟動只會用已儲存嘅 Worker 設定。";
+      els.saveHint.textContent = "尚未儲存。請先按綠色「儲存設定」，再讓每個 Worker 登入 Apple ID。";
+      updateStartGate();
       return;
     }
     if (state.dirty) {
       els.saveHint.className = "save-hint dirty";
-      els.saveHint.textContent = "有未儲存變更。請先按「儲存設定」，否則不能全域啟動。";
+      els.saveHint.textContent = "有未儲存變更。請先按「儲存設定」，否則不能全部開始搶機。";
+      updateStartGate();
       return;
     }
     els.saveHint.className = "save-hint saved";
-    els.saveHint.textContent = `已儲存 ${state.savedWorkers.length} 個 Worker。按全域啟動時會用呢份設定。`;
+    els.saveHint.textContent = `已儲存 ${state.savedWorkers.length} 個 Worker。全部開始搶機只會用呢份設定。`;
+    updateStartGate();
   }
 
   function readCardsIntoState() {
@@ -180,6 +185,7 @@
         apple_id: prev.apple_id || "",
         logged_in: Boolean(prev.logged_in || prev.apple_id),
         sniping: Boolean(prev.sniping),
+        browser_open: Boolean(prev.browser_open),
       };
     });
     persistDraft();
@@ -195,7 +201,6 @@
   function anyBrowserOpen() {
     return state.workers.some((worker) => (
       worker.sniping
-      || worker.logged_in
       || worker.browser_open
       || worker.status === "logging_in"
       || worker.status === "launching"
@@ -205,9 +210,40 @@
     ));
   }
 
+  function unloggedWorkers() {
+    return state.workers.filter((worker) => !(worker.logged_in || worker.apple_id));
+  }
+
+  function updateStartGate() {
+    if (!els.start) return;
+    const unsaved = !(state.savedWorkers && state.savedWorkers.length) || state.dirty;
+    const unlogged = unloggedWorkers();
+    const allSniping = state.workers.length > 0 && state.workers.every((worker) => worker.sniping);
+    const blocked = unsaved || unlogged.length > 0 || allSniping;
+    els.start.disabled = blocked;
+    if (!els.startHint) return;
+    if (unsaved) {
+      els.startHint.className = "start-hint blocked";
+      els.startHint.textContent = "請先儲存設定，先至可以全部開始搶機。";
+      return;
+    }
+    if (unlogged.length) {
+      els.startHint.className = "start-hint blocked";
+      els.startHint.textContent = `仲有 ${unlogged.length} 個未登入：${unlogged.map((item) => item.name || "未命名").join("、")}。請登入，或者刪除未登入嘅 Worker。`;
+      return;
+    }
+    if (allSniping) {
+      els.startHint.className = "start-hint ok";
+      els.startHint.textContent = "全部 Worker 已在搶機。要停某個請撳「暫停呢個」。";
+      return;
+    }
+    els.startHint.className = "start-hint ok";
+    els.startHint.textContent = `已登入 ${state.workers.length} 個 Worker，可以全部開始搶機。單個暫停／繼續用每張卡下面嘅掣。`;
+  }
+
   function setRunning(running, testMode) {
     state.running = running;
-    els.start.disabled = false;
+    updateStartGate();
     els.stop.disabled = !running && !anyBrowserOpen();
     els.add.disabled = false;
     if (els.save) els.save.disabled = false;
@@ -274,9 +310,14 @@
     const status = worker.status || (worker.logged_in ? "ready" : "needs_login");
     const sniping = Boolean(worker.sniping);
     const loggedIn = Boolean(worker.logged_in || worker.apple_id);
+    const closed = status === "browser_closed";
     const email = worker.apple_id || "";
+    const note = worker.last_message || (loggedIn
+      ? "已登入，等你撳上面綠色「全部開始搶機」，或呢張卡嘅「繼續呢個」。"
+      : "未登入。請先撳「登入 Apple ID」。");
+    const sessionHint = `會儲存在專案資料夾 sessions/${worker.session_dir || "session_worker_1"}。Chromium 把 Apple ID cookie 寫入呢度，下次開同一個資料夾就記得登入。`;
     return `
-      <article class="worker-card${entering ? " enter" : ""}${sniping ? " is-sniping" : ""}" data-id="${esc(worker.id)}" data-status="${esc(status)}" data-message="${esc(worker.last_message || "")}" data-purchased="${esc(worker.purchased || 0)}" data-sniping="${sniping}" data-logged-in="${loggedIn}">
+      <article class="worker-card${entering ? " enter" : ""}${sniping ? " is-sniping" : ""}${closed ? " is-closed" : ""}" data-id="${esc(worker.id)}" data-status="${esc(status)}" data-message="${esc(worker.last_message || "")}" data-purchased="${esc(worker.purchased || 0)}" data-sniping="${sniping}" data-logged-in="${loggedIn}">
         <div class="worker-top">
           <strong class="worker-title">${esc(worker.name)}</strong>
           <span class="badge ${esc(status)}">${esc(statusLabel(status))}${worker.purchased ? ` · ${worker.purchased}/${worker.max_qty}` : ""}</span>
@@ -284,8 +325,9 @@
         <div class="account-bar ${loggedIn ? "is-in" : "is-out"}">
           <span>Apple ID</span>
           <strong class="account-email">${loggedIn ? esc(email || "已登入") : "未登入"}</strong>
-          <button type="button" class="btn login">${loggedIn ? "重新登入 / 帶到最前" : "登入 Apple ID"}</button>
+          <button type="button" class="btn login">${closed ? "重新打開瀏覽器" : (loggedIn ? "帶到最前" : "登入 Apple ID")}</button>
         </div>
+        <p class="worker-note${closed ? " warn" : ""}">${esc(note)}</p>
         <div class="grid">
           <label class="field">
             <span>Worker 名稱 / 編號</span>
@@ -294,6 +336,7 @@
           <label class="field">
             <span>Apple ID Session 資料夾</span>
             <input class="session" type="text" value="${esc(worker.session_dir)}" placeholder="session_worker_1" />
+            <p class="help session-path">${esc(sessionHint)}</p>
           </label>
           <div class="field full sku-block">
             <span>1. 目標機型（下拉選單揀 Duo 型號）</span>
@@ -319,12 +362,13 @@
           </label>
         </div>
         <div class="card-actions">
-          <button type="button" class="btn run-one" ${loggedIn && !sniping ? "" : "disabled"}>開始運作</button>
-          <button type="button" class="btn pause-one" ${sniping ? "" : "disabled"}>停止運作</button>
+          <button type="button" class="btn run-one" ${loggedIn && !sniping ? "" : "disabled"}>繼續呢個</button>
+          <button type="button" class="btn pause-one" ${sniping ? "" : "disabled"}>暫停呢個</button>
           <button type="button" class="btn focus">顯示此 Worker 視窗</button>
-          <button type="button" class="btn clone">複製做新 Apple ID</button>
+          <button type="button" class="btn clone">複製設定（另一個 Apple ID）</button>
           <button type="button" class="btn remove">刪除此 Worker</button>
         </div>
+        <p class="help">「複製設定（另一個 Apple ID）」用嚟加第二個帳戶搶同一部機：會複製機型／門市，但開全新空白 session，唔會郁到而家呢個已登入帳戶。</p>
       </article>
     `;
   }
@@ -352,11 +396,14 @@
     const status = worker.status || "needs_login";
     const sniping = Boolean(worker.sniping);
     const loggedIn = Boolean(worker.logged_in || worker.apple_id);
+    const closed = status === "browser_closed";
     card.dataset.status = status;
     card.dataset.purchased = String(worker.purchased || 0);
     card.dataset.sniping = String(sniping);
     card.dataset.loggedIn = String(loggedIn);
+    card.dataset.message = worker.last_message || "";
     card.classList.toggle("is-sniping", sniping);
+    card.classList.toggle("is-closed", closed);
     const badge = card.querySelector(".badge");
     if (badge) {
       badge.className = `badge ${status}`;
@@ -372,11 +419,18 @@
       accountBar.classList.toggle("is-out", !loggedIn);
     }
     const loginBtn = card.querySelector(".login");
-    if (loginBtn) loginBtn.textContent = loggedIn ? "重新登入 / 帶到最前" : "登入 Apple ID";
+    if (loginBtn) loginBtn.textContent = closed ? "重新打開瀏覽器" : (loggedIn ? "帶到最前" : "登入 Apple ID");
     const runBtn = card.querySelector(".run-one");
     const pauseBtn = card.querySelector(".pause-one");
     if (runBtn) runBtn.disabled = !loggedIn || sniping;
     if (pauseBtn) pauseBtn.disabled = !sniping;
+    const note = card.querySelector(".worker-note");
+    if (note) {
+      note.classList.toggle("warn", closed);
+      note.textContent = worker.last_message || (loggedIn
+        ? "已登入，等你撳上面綠色「全部開始搶機」，或呢張卡嘅「繼續呢個」。"
+        : "未登入。請先撳「登入 Apple ID」。");
+    }
   }
 
   function refreshSkuDropdowns(selectId, sku) {
@@ -464,19 +518,37 @@
       ts: new Date().toISOString(),
       worker: "frontend",
       level: "success",
-      message: `已儲存 ${state.savedWorkers.length} 個 Worker 設定。全域啟動會用呢份設定。`,
+      message: `已儲存 ${state.savedWorkers.length} 個 Worker 設定。全部開始搶機會用呢份設定。`,
     });
     return true;
   }
 
   async function start() {
-    if (state.previewMode) {
-      window.alert(PREVIEW_ALERT);
-      return;
-    }
     readCardsIntoState();
     if (!state.savedWorkers.length || state.dirty) {
-      window.alert("請先喺 Worker Profiles 撳綠色「儲存設定」，再按全域啟動。系統只會用已儲存嘅 Worker 設定來跑。");
+      window.alert("請先喺 Worker Profiles 撳綠色「儲存設定」，再按全部開始搶機。");
+      return;
+    }
+    const unlogged = unloggedWorkers();
+    if (unlogged.length) {
+      window.alert(`仲有 Worker 未登入 Apple ID：${unlogged.map((item) => item.name).join("、")}。請登入，或者刪除未登入嘅 Worker。`);
+      updateStartGate();
+      return;
+    }
+    if (state.previewMode) {
+      state.workers.forEach((worker) => {
+        worker.sniping = true;
+        worker.status = "watching";
+        worker.last_message = "預覽模式：模擬全部開始搶機。真正搶機請用 python app.py。";
+        patchWorkerStatus(worker);
+      });
+      setRunning(true, els.testMode.checked);
+      appendLog({
+        ts: new Date().toISOString(),
+        worker: "frontend",
+        level: "success",
+        message: "預覽模式：已模擬全部開始搶機。真正開瀏覽器請用 python app.py。",
+      });
       return;
     }
     if (!els.testMode.checked && !window.confirm(LIVE_CONFIRM)) {
@@ -494,7 +566,7 @@
       });
       applyStatus(data);
     } catch (err) {
-      els.start.disabled = false;
+      updateStartGate();
       appendLog({ ts: new Date().toISOString(), worker: "frontend", level: "error", message: err.message });
     }
   }
@@ -563,7 +635,7 @@
   async function runOne(id) {
     const worker = state.workers.find((item) => item.id === id);
     if (!worker || !(worker.logged_in || worker.apple_id)) {
-      window.alert("請先撳「登入 Apple ID」，登入成功變成待命後先可以開始運作。");
+      window.alert("請先撳「登入 Apple ID」，登入成功後先可以繼續呢個 Worker。");
       return;
     }
     if (!els.testMode.checked && !window.confirm(LIVE_CONFIRM)) {
@@ -573,15 +645,15 @@
     if (state.previewMode) {
       worker.sniping = true;
       worker.status = "watching";
-      worker.last_message = "預覽模式：模擬開始運作。真正搶機請用 python app.py。";
-      patchWorkerStatus(worker);
-      setRunning(true, els.testMode.checked);
-      appendLog({
-        ts: new Date().toISOString(),
-        worker: worker.name,
-        level: "success",
-        message: "預覽模式：已模擬開始運作。真正開瀏覽器搶購請用 python app.py。",
-      });
+        worker.last_message = "預覽模式：已繼續呢個 Worker。真正搶機請用 python app.py。";
+        patchWorkerStatus(worker);
+        setRunning(true, els.testMode.checked);
+        appendLog({
+          ts: new Date().toISOString(),
+          worker: worker.name,
+          level: "success",
+          message: "預覽模式：已模擬繼續呢個 Worker。",
+        });
       return;
     }
     try {
@@ -600,7 +672,7 @@
       if (worker) {
         worker.sniping = false;
         worker.status = worker.logged_in || worker.apple_id ? "ready" : "needs_login";
-        worker.last_message = "預覽模式：已停止運作。";
+        worker.last_message = "預覽模式：已暫停呢個 Worker。撳「繼續呢個」即可再搶。";
         patchWorkerStatus(worker);
       }
       setRunning(state.workers.some((item) => item.sniping), els.testMode.checked);
@@ -608,7 +680,7 @@
         ts: new Date().toISOString(),
         worker: worker ? worker.name : "frontend",
         level: "info",
-        message: "預覽模式：已模擬停止運作。登入狀態仍然保留。",
+        message: "預覽模式：已模擬暫停。登入狀態仍然保留，撳「繼續呢個」即可再搶。",
       });
       return;
     }
@@ -682,6 +754,7 @@
         persistDraft();
         if (!remaining.length) mountWorker(state.workers[0]);
         updateSaveHint();
+        setRunning(state.running, els.testMode.checked);
       };
       card.classList.add("leave");
       card.addEventListener("animationend", finish, { once: true });
@@ -711,7 +784,7 @@
         ts: new Date().toISOString(),
         worker: copy.name,
         level: "info",
-        message: `已複製設定到新 session「${copy.session_dir}」。請儲存後再啟動，喺新視窗用另一個 Apple ID 登入。唔使刪舊 Worker 嘅瀏覽器資料。`,
+        message: `已複製機型／門市到新 Worker，session「${copy.session_dir}」係全新空白登入。舊帳戶唔會被改。請儲存，再喺新 Worker 登入第二個 Apple ID。`,
       });
     }
     if (event.target.closest(".focus")) {

@@ -18,6 +18,7 @@ WorkerStatus = Literal[
     "dry_run_paused",
     "completed",
     "stopped",
+    "browser_closed",
     "error",
 ]
 

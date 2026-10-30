@@ -5,7 +5,7 @@ import random
 from pathlib import Path
 from typing import Any
 
-from bot.account import detect_apple_id, looks_like_signin
+from bot.account import detect_apple_id, has_apple_session, looks_like_signin
 from bot.catalogs import (
     INVENTORY_TIMEOUT_MS,
     POLL_JITTER_SECONDS,
@@ -30,12 +30,31 @@ ROOT = Path(__file__).resolve().parent.parent
 SESSIONS_ROOT = ROOT / "sessions"
 
 
-def resolve_session_dir(raw: str) -> Path:
+CLOSED_ERROR_MARKERS = (
+    "target closed",
+    "has been closed",
+    "browser has been closed",
+    "context or browser has been closed",
+    "connection closed",
+)
+
+
+def session_dir_path(raw: str) -> Path:
     path = Path(raw).expanduser()
     if not path.is_absolute():
         path = SESSIONS_ROOT / path
+    return path
+
+
+def resolve_session_dir(raw: str) -> Path:
+    path = session_dir_path(raw)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def is_browser_closed_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in CLOSED_ERROR_MARKERS)
 
 
 class Worker:
@@ -54,6 +73,7 @@ class Worker:
         self.purchased = 0
         self.last_message = ""
         self.apple_id: str | None = None
+        self.logged_in = False
         self.sniping = False
         self.context: Any = None
         self.ready_event = asyncio.Event()
@@ -61,6 +81,8 @@ class Worker:
         self.snipe_stop = asyncio.Event()
         self._snipe_task: asyncio.Task | None = None
         self._login_task: asyncio.Task | None = None
+        self._closed_task: asyncio.Task | None = None
+        self._closing = False
         self._rng = random.Random(profile.id)
 
     def snapshot(self) -> dict:
@@ -76,9 +98,10 @@ class Worker:
             "status": self.status,
             "last_message": self.last_message,
             "apple_id": self.apple_id,
-            "logged_in": bool(self.apple_id),
+            "logged_in": bool(self.logged_in or self.apple_id),
             "sniping": self.sniping,
             "browser_open": self.context is not None,
+            "session_path": str(session_dir_path(self.profile.session_dir)),
         }
 
     def _set(self, status: str, message: str, *, level: str = "info") -> None:
@@ -92,6 +115,7 @@ class Worker:
         await bring_context_to_front(self.context)
 
     async def shutdown(self) -> None:
+        self._closing = True
         self.stop_event.set()
         self.snipe_stop.set()
         await self._cancel_snipe()
@@ -108,14 +132,74 @@ class Worker:
             await asyncio.gather(task, return_exceptions=True)
 
     async def _close_browser(self) -> None:
+        self._closing = True
         context = self.context
         self.context = None
         if context is None:
+            self._closing = False
             return
         try:
             await context.close()
         except Exception:
             pass
+        self._closing = False
+
+    def _schedule_browser_closed(self) -> None:
+        if self._closing:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if self._closed_task and not self._closed_task.done():
+            return
+        self._closed_task = loop.create_task(self._on_browser_closed())
+
+    async def _on_browser_closed(self) -> None:
+        if self._closing:
+            return
+        if self.context is None and self.status == "browser_closed":
+            return
+        self.context = None
+        was_sniping = self.sniping
+        await self._cancel_snipe()
+        if was_sniping:
+            message = (
+                "你手動關閉咗呢個 Worker 嘅瀏覽器，已自動停止搶購。"
+                "登入資料仍保存在 session 資料夾。要再搶請撳「繼續呢個」，系統會重新打開瀏覽器。"
+            )
+        else:
+            message = (
+                "你手動關閉咗呢個 Worker 嘅瀏覽器。"
+                "登入資料仍保存在 session 資料夾。要再操作請撳「登入 Apple ID」重新打開視窗。"
+            )
+        self._set("browser_closed", message, level="warn")
+
+    def _bind_close_watchers(self) -> None:
+        context = self.context
+        if context is None:
+            return
+
+        def on_context_close() -> None:
+            self._schedule_browser_closed()
+
+        def attach_page(page) -> None:
+            def on_page_close() -> None:
+                if self._closing:
+                    return
+                try:
+                    pages = [item for item in context.pages if not item.is_closed()]
+                except Exception:
+                    pages = []
+                if not pages:
+                    self._schedule_browser_closed()
+
+            page.on("close", on_page_close)
+
+        context.on("close", on_context_close)
+        context.on("page", attach_page)
+        for page in list(getattr(context, "pages", []) or []):
+            attach_page(page)
 
     async def _page(self):
         assert self.context is not None
@@ -136,12 +220,14 @@ class Worker:
             timezone_id="Asia/Hong_Kong",
             args=["--disable-blink-features=AutomationControlled"],
         )
+        self._bind_close_watchers()
         page = self.context.pages[0] if self.context.pages else await self.context.new_page()
         await page.goto(shop_home_url(), wait_until="domcontentloaded", timeout=45_000)
         self.ready_event.set()
-        email = await self.refresh_account()
-        if email:
-            self._set("ready", f"已登入 Apple ID：{email}。待命中，等你開始運作。")
+        await self.refresh_account()
+        if self.logged_in:
+            label = self.apple_id or "已登入"
+            self._set("ready", f"已登入 Apple ID：{label}。待命中，撳「全部開始搶機」或「繼續呢個」。")
         else:
             self._set("needs_login", "瀏覽器已開，尚未登入 Apple ID。請撳「登入 Apple ID」。")
 
@@ -150,24 +236,33 @@ class Worker:
             return self.apple_id
         page = await self._page()
         email = await detect_apple_id(page)
-        if not email and not self.sniping:
+        session = await has_apple_session(self.context)
+        if not email and not session and not self.sniping:
             try:
                 await page.goto(account_url(), wait_until="domcontentloaded", timeout=30_000)
             except Exception:
                 pass
             email = await detect_apple_id(page)
-        self.apple_id = email
-        if email and self.status in {"needs_login", "logging_in", "idle", "launching"} and not self.sniping:
-            self._set("ready", f"已登入 Apple ID：{email}。待命中，等你開始運作。")
-        return email
+            session = await has_apple_session(self.context)
+        if email:
+            self.apple_id = email
+        if email or session:
+            self.logged_in = True
+        else:
+            self.apple_id = None
+            self.logged_in = False
+        if self.logged_in and self.status in {"needs_login", "logging_in", "idle", "launching"} and not self.sniping:
+            label = self.apple_id or "已登入"
+            self._set("ready", f"已登入 Apple ID：{label}。待命中，撳「全部開始搶機」或「繼續呢個」。")
+        return self.apple_id
 
     async def open_login(self) -> None:
         await self.ensure_browser()
         page = await self._page()
         email = await self.refresh_account()
         await self.bring_to_front()
-        if email:
-            hub.info(self.profile.name, f"已登入 {email}，視窗已帶到最前")
+        if self.logged_in:
+            hub.info(self.profile.name, f"已登入 {email or 'Apple ID'}，視窗已帶到最前")
             return
         self._set("logging_in", "已打開 Apple ID 登入頁，請在瀏覽器完成登入（含 2FA）")
         try:
@@ -181,43 +276,55 @@ class Worker:
 
     async def _watch_login(self) -> None:
         for _ in range(180):
-            if self.stop_event.is_set() or self.sniping:
+            if self.stop_event.is_set() or self.sniping or self.status == "browser_closed":
                 return
             await asyncio.sleep(2)
             try:
+                if self.context is None:
+                    return
                 page = await self._page()
-                if looks_like_signin(page.url):
+                if looks_like_signin(page.url) and not await has_apple_session(self.context):
                     continue
                 email = await self.refresh_account()
-            except Exception:
+            except Exception as exc:
+                if is_browser_closed_error(exc):
+                    self._schedule_browser_closed()
+                    return
                 continue
-            if email:
+            if self.logged_in:
                 if not self.sniping:
-                    self._set("ready", f"登入成功：{email}。而家係真正待命，可以開始運作或全域啟動。")
+                    label = email or self.apple_id or "已登入"
+                    self._set("ready", f"登入成功：{label}。而家係真正待命，可以全部開始搶機。")
                 return
-        if not self.apple_id:
+        if not self.logged_in:
             self._set("needs_login", "仍未偵測到登入。可再撳「登入 Apple ID」。", level="warn")
 
     async def start_sniping(self) -> None:
-        if not self.apple_id and self.context is not None:
-            await self.refresh_account()
-        if not self.apple_id:
-            raise RuntimeError("尚未登入 Apple ID，不能開始搶機")
+        if not self.logged_in and not self.apple_id:
+            if self.context is not None:
+                await self.refresh_account()
+            if not self.logged_in and not self.apple_id:
+                raise RuntimeError("尚未登入 Apple ID，不能開始搶機")
         await self.ensure_browser()
+        await self.refresh_account()
+        if not self.logged_in and not self.apple_id:
+            raise RuntimeError("尚未登入 Apple ID，不能開始搶機")
         if self.sniping:
             return
         self.snipe_stop = asyncio.Event()
         self.sniping = True
         self._snipe_task = asyncio.create_task(self._snipe_loop(), name=f"snipe-{self.profile.name}")
-        self._set("watching", f"開始搶購（{self.apple_id}）")
+        label = self.apple_id or "已登入"
+        self._set("watching", f"開始搶購（{label}）")
 
     async def stop_sniping(self) -> None:
         self.snipe_stop.set()
         await self._cancel_snipe()
-        if self.apple_id:
-            self._set("ready", f"已停止運作。Apple ID {self.apple_id} 仍然登入，可隨時再開。")
+        if self.logged_in or self.apple_id:
+            label = self.apple_id or "已登入"
+            self._set("ready", f"已暫停搶購。Apple ID {label} 仍然登入，撳「繼續呢個」即可再搶。")
         else:
-            self._set("needs_login", "已停止運作，尚未登入 Apple ID。")
+            self._set("needs_login", "已暫停搶購，尚未登入 Apple ID。")
 
     async def _check_inventory(self) -> list:
         assert self.context is not None
@@ -244,6 +351,9 @@ class Worker:
                 and not self.snipe_stop.is_set()
                 and self.purchased < self.profile.max_qty
             ):
+                if self.context is None:
+                    await self._on_browser_closed()
+                    return
                 try:
                     matches = await self._check_inventory()
                     blocks = 0
@@ -258,6 +368,9 @@ class Worker:
                     await asyncio.sleep(wait_for)
                     continue
                 except Exception as exc:
+                    if is_browser_closed_error(exc):
+                        await self._on_browser_closed()
+                        return
                     self._set("watching", f"庫存查詢異常：{exc}", level="warn")
                     await asyncio.sleep(next_poll_delay(POLL_SECONDS, POLL_JITTER_SECONDS, self._rng))
                     continue
