@@ -45,8 +45,11 @@ C:\Users\你的名字\Downloads\apu-bot-2-cursor-hk-iphone-bot-2570
 
 Python 係跑呢個程式嘅語言。未裝過都得，跟住做：
 
-1. 用瀏覽器打開 https://www.python.org/downloads/windows/ ，下載最新 Python 3 installer。  
-   **意思：** 由官方網站裝 Python，唔好用不明來源。
+1. 用瀏覽器打開 https://www.python.org/downloads/windows/ ，下載 **Python 3.12 或 3.13 的 Windows installer (64-bit)**。  
+   **意思：** 由官方網站裝 Python，唔好用不明來源。  
+   **唔好撳黃色大掣 Latest**（而家可能係 3.15）。最新版好多套件未有現成 Windows 檔，`pip` 就會叫你裝 Visual C++——**呢個 Bot 唔需要裝 Build Tools**。亦**唔好揀 32-bit**。  
+   建議用 Python 3.13 最後一個有安裝檔嘅版本：https://www.python.org/downloads/release/python-31317/ → **Windows installer (64-bit)**。  
+   或者 Python 3.12：https://www.python.org/downloads/release/python-31210/ → **Windows installer (64-bit)**。
 2. 安裝時**一定要勾**最下面 **「Add python.exe to PATH」**，然後 Next 完成。  
    **意思：** 勾咗之後，PowerShell 先識得 `py` / `python` 呢啲指令。漏勾會變成「找不到 python」。
 3. 打開 **PowerShell**：開始選單搜尋 `PowerShell`，Enter。  
@@ -57,7 +60,7 @@ Python 係跑呢個程式嘅語言。未裝過都得，跟住做：
 py --version
 ```
 
-見到 `Python 3.12.x` 或 `Python 3.11.x` 就得。  
+見到 `Python 3.13.x`、`3.12.x` 或 `3.14.x` 就得。如果見到 `3.15` 或者寫住 32-bit，請改裝上面嘅 3.12 或 3.13 64-bit。  
 **意思：** 確認 Python 已裝好，而且 PowerShell 搵到佢。如果話唔識 `py`，多數係未勾 PATH，或者要**關掉 PowerShell 再開過**。
 
 ### C. 進入專案資料夾
@@ -184,6 +187,39 @@ http://127.0.0.1:8765
 6. **緊急停止所有 Bot** 會關閉全部瀏覽器。手動關閉某個 Worker 視窗，嗰個會自動停搶，再撳 **開始運作** 可重開。
 
 ## 常見問題
+
+### `pip install` 話要 Microsoft Visual C++ / Failed building wheel for pyyaml？
+
+**唔使裝 Visual C++ Build Tools。** 呢個 Bot 唔使編譯 PyYAML。
+
+原因：舊版 `requirements.txt` 用咗 `uvicorn[standard]`，會順便裝 PyYAML。如果你裝咗好新嘅 Python（3.14 / 3.15）或者 32-bit，PyPI 冇現成 Windows 檔，pip 就嘗試喺部機編譯，然後叫你裝 C++。
+
+跟呢幾步（喺專案資料夾、已 `Activate.ps1` 見到 `(.venv)`）：
+
+1. 離開虛擬環境：`deactivate`
+2. 刪咗半裝嘅環境：
+
+```powershell
+rmdir /s /q .venv
+```
+
+3. 確認版本（要 `3.12` / `3.13` / `3.14`，64-bit）：
+
+```powershell
+py --version
+```
+
+如果唔啱，用上面「B. 安裝 Python」裝 **3.12 或 3.13 64-bit**，然後關咗 PowerShell 再開過。
+4. 重建環境再裝一次：
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+playwright install chromium
+```
+
+用更新後嘅 `requirements.txt`（入面係 `uvicorn`，**冇** `[standard]`）。仍然失敗就唔好再裝 C++，先檢查係咪裝咗 32-bit 或 3.15。
 
 ### 如果一直冇補貨，程式會點？
 
