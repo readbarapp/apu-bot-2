@@ -167,3 +167,17 @@ def test_confirm_copy_lives_only_on_frontend() -> None:
     app = Path("app.py").read_text()
     assert "window.confirm" in js
     assert "window.confirm" not in app
+
+
+def test_readme_is_windows_local_guide() -> None:
+    text = Path("README.md").read_text()
+    assert "第一次安裝" in text
+    assert "每次點樣開控制台" in text
+    assert "PowerShell" in text
+    assert "http://127.0.0.1:8765" in text
+    assert "每部電腦都係同一條" in text
+    assert "一直輪詢" in text
+    assert "有冇資安問題" in text
+    assert "host=\"127.0.0.1\"" in Path("app.py").read_text()
+    assert "Spotlight" not in text
+    assert "source .venv/bin/activate" not in text
