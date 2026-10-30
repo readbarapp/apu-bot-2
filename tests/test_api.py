@@ -69,6 +69,18 @@ def test_index_and_frontend_assets(client) -> None:
     assert "數量上限係此 Worker 全部門市合計" in preview
 
 
+def test_requirements_skip_packages_that_need_msvc_on_windows() -> None:
+    text = Path("requirements.txt").read_text()
+    readme = Path("README.md").read_text()
+    assert "uvicorn[standard]" not in text
+    assert "pyyaml" not in text.lower()
+    assert "httptools" not in text
+    assert "uvicorn>=" in text
+    assert "websockets>=" in text
+    assert "Failed building wheel for pyyaml" in readme
+    assert "唔使裝 Visual C++ Build Tools" in readme
+
+
 def test_custom_sku_can_be_removed_from_dropdown() -> None:
     js = Path("static/js/app.js").read_text()
     readme = Path("README.md").read_text()
