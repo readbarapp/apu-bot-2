@@ -35,6 +35,11 @@ def test_index_and_frontend_assets(client) -> None:
     assert js.status_code == 200
     assert "警告：您目前未開啟測試模式，系統啟動後若偵測到有貨將會進行真實的信用卡扣款與下單！請問是否確定要啟動？" in js.text
     assert "window.confirm" in js.text
+    assert "FALLBACK_CATALOG" in js.text
+    preview = Path("preview.html").read_text()
+    assert 'href="static/css/app.css"' in preview
+    assert 'src="static/js/app.js"' in preview
+    assert "預覽模式" in preview
 
 
 def test_duplicate_session_dir_rejected(client) -> None:
