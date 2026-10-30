@@ -1,0 +1,58 @@
+{
+  "head": { "status": "200", "data": {} },
+  "body": {
+    "stores": [
+      {
+        "storeNumber": "R428",
+        "storeName": "ifc mall",
+        "partsAvailability": {
+          "MK2E4ZA/A": {
+            "storePickEligible": true,
+            "pickupSearchQuote": "今天可取貨",
+            "pickupDisplay": "available",
+            "messageTypes": {
+              "regular": {
+                "storeSelectionEnabled": true,
+                "storePickupQuote": "今天可取貨，營業時間：10:00 - 21:00"
+              }
+            }
+          }
+        }
+      },
+      {
+        "storeNumber": "R409",
+        "storeName": "Hysan Place",
+        "partsAvailability": {
+          "MK2E4ZA/A": {
+            "storePickEligible": true,
+            "pickupSearchQuote": "暫無供應",
+            "pickupDisplay": "unavailable",
+            "messageTypes": {
+              "regular": {
+                "storeSelectionEnabled": false,
+                "storePickupQuote": "Apple Hysan Place 暫時無法提供"
+              }
+            }
+          }
+        }
+      },
+      {
+        "storeNumber": "R499",
+        "storeName": "Canton Road",
+        "partsAvailability": {
+          "MK2E4ZA/A": {
+            "storePickEligible": true,
+            "pickupSearchQuote": "4 日後可取貨",
+            "pickupDisplay": "available",
+            "messageTypes": {
+              "regular": {
+                "storeSelectionEnabled": true,
+                "storePickupQuote": "4 日後可取貨"
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
+}
