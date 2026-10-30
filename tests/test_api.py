@@ -56,12 +56,28 @@ def test_index_and_frontend_assets(client) -> None:
     assert "儲存此 Worker" in preview
     assert "加入此 SKU" in js.text
     assert "sku-label" in js.text
+    assert "remove-sku" in js.text
+    assert "extra-sku-list" in js.text
+    assert "打錯可以刪" in js.text
+    assert "closest(\".remove-sku\")" in js.text
+    assert "有 Worker 正用呢個 SKU 搶機" in js.text
     assert "confirmLiveStart" in js.text
     assert "初次設定流程" in preview
     assert "購買數量上限（此 Worker 全部門市合計）" in js.text
     assert "唔係每間門市各 2 部" in js.text
     assert "數量上限係此 Worker 全部門市合計" in page.text
     assert "數量上限係此 Worker 全部門市合計" in preview
+
+
+def test_custom_sku_can_be_removed_from_dropdown() -> None:
+    js = Path("static/js/app.js").read_text()
+    readme = Path("README.md").read_text()
+    assert "function extraSkuListHtml()" in js
+    assert 'class="btn remove-sku"' in js
+    assert "state.extraSkus = extras.filter" in js
+    assert "內建機型刪唔到" in js
+    assert "打錯可以刪" in readme
+    assert "內建 Duo 機型刪唔到" in readme
 
 
 def test_live_confirm_runs_before_global_start() -> None:
