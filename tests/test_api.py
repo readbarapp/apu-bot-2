@@ -37,14 +37,23 @@ def test_index_and_frontend_assets(client) -> None:
     assert "window.confirm" in js.text
     assert "FALLBACK_CATALOG" in js.text
     assert "STATUS_LABELS" in js.text
-    assert "待命（未啟動）" in js.text
+    assert "待命（已登入）" in js.text
+    assert "登入 Apple ID" in js.text
+    assert "開始運作" in js.text
+    assert "停止運作" in js.text
     assert "儲存設定" in page.text
+    assert "初次設定流程" in page.text
+    assert "搶夠上限會自動停" in page.text
+    assert "複製做新 Apple ID" in js.text
+    assert "mountWorker" in js.text
     preview = Path("preview.html").read_text()
     assert 'href="static/css/app.css"' in preview
     assert 'src="static/js/app.js"' in preview
     assert "預覽模式" in preview
     assert "儲存設定" in preview
     assert "加入此 SKU" in js.text
+    assert "複製做新 Apple ID" in js.text
+    assert "初次設定流程" in preview
 
 
 def test_duplicate_session_dir_rejected(client) -> None:
@@ -63,33 +72,64 @@ def test_start_requires_worker_and_known_store(client) -> None:
     assert bad_store.status_code == 422
 
 
-def test_frontend_driven_start_focus_and_emergency_stop(client) -> None:
-    idle = client.get("/api/status").json()
-    assert idle["running"] is False
+def test_start_without_login_is_rejected(client) -> None:
+    response = client.post("/api/start", json={"test_mode": True, "workers": [SAMPLE_WORKER]})
+    assert response.status_code == 409
+    assert "Apple ID" in response.json()["detail"]
+
+
+def test_login_then_individual_run_pause_and_global_start(client) -> None:
+    payload = {"test_mode": True, "worker": SAMPLE_WORKER}
+    denied = client.post("/api/workers/run", json=payload)
+    assert denied.status_code == 409
+
+    logged = client.post("/api/workers/login", json=payload)
+    assert logged.status_code == 200, logged.text
+    body = logged.json()["workers"][0]
+    assert body["logged_in"] is True
+    assert body["apple_id"] == "tester@icloud.com"
+    assert body["status"] == "ready"
+    worker = manager.workers["w1"]
+    assert worker.focused >= 1
+
+    running = client.post("/api/workers/run", json=payload)
+    assert running.status_code == 200
+    assert running.json()["workers"][0]["sniping"] is True
+    assert running.json()["running"] is True
+
+    paused = client.post("/api/workers/w1/pause")
+    assert paused.status_code == 200
+    assert paused.json()["workers"][0]["sniping"] is False
+    assert paused.json()["workers"][0]["status"] == "ready"
 
     started = client.post("/api/start", json={"test_mode": True, "workers": [SAMPLE_WORKER]})
     assert started.status_code == 200, started.text
-    body = started.json()
-    assert body["running"] is True
-    assert body["test_mode"] is True
-    assert body["workers"][0]["status"] == "watching"
-    worker = manager.workers["w1"]
-    assert worker.focused >= 1
+    assert started.json()["workers"][0]["status"] == "watching"
+
+    other = {
+        **SAMPLE_WORKER,
+        "id": "w2",
+        "name": "Worker_2",
+        "session_dir": "session_worker_2",
+    }
+    mixed = client.post("/api/start", json={"test_mode": True, "workers": [SAMPLE_WORKER, other]})
+    assert mixed.status_code == 200, mixed.text
+    by_id = {item["id"]: item for item in mixed.json()["workers"]}
+    assert by_id["w1"]["sniping"] is True
+    assert by_id["w2"]["sniping"] is False
+    assert by_id["w2"]["logged_in"] is False
 
     focused = client.post("/api/workers/w1/focus")
     assert focused.status_code == 200
     assert worker.focused >= 2
 
-    duplicate = client.post("/api/start", json={"test_mode": True, "workers": [SAMPLE_WORKER]})
-    assert duplicate.status_code == 409
-
     stopped = client.post("/api/stop")
     assert stopped.status_code == 200
     assert stopped.json()["running"] is False
-    assert manager.workers["w1"].status == "stopped"
 
 
 def test_live_mode_is_backend_accepted_without_server_side_confirm(client) -> None:
+    client.post("/api/workers/login", json={"test_mode": False, "worker": SAMPLE_WORKER})
     started = client.post("/api/start", json={"test_mode": False, "workers": [SAMPLE_WORKER]})
     assert started.status_code == 200
     assert started.json()["test_mode"] is False

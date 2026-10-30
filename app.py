@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from bot.catalogs import catalog_payload
 from bot.logs import hub
 from bot.manager import EngineError, manager
-from bot.models import StartRequest
+from bot.models import StartRequest, WorkerActionRequest
 from bot.worker import SESSIONS_ROOT
 
 ROOT = Path(__file__).resolve().parent
@@ -56,6 +56,30 @@ async def start(payload: StartRequest) -> dict:
 @app.post("/api/stop")
 async def stop() -> dict:
     return await manager.stop()
+
+
+@app.post("/api/workers/login")
+async def login_worker(payload: WorkerActionRequest) -> dict:
+    try:
+        return await manager.login_worker(payload.worker, payload.test_mode)
+    except EngineError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post("/api/workers/run")
+async def run_worker(payload: WorkerActionRequest) -> dict:
+    try:
+        return await manager.run_worker(payload.worker, payload.test_mode)
+    except EngineError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post("/api/workers/{worker_id}/pause")
+async def pause_worker(worker_id: str) -> dict:
+    try:
+        return await manager.pause_worker(worker_id)
+    except EngineError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @app.post("/api/workers/{worker_id}/focus")

@@ -66,3 +66,11 @@ def checkout_url() -> str:
 
 def shop_home_url() -> str:
     return f"{APPLE_ORIGIN}/{APPLE_LOCALE}/shop"
+
+
+def signin_url() -> str:
+    return f"{APPLE_ORIGIN}/{APPLE_LOCALE}/shop/signIn"
+
+
+def account_url() -> str:
+    return f"{APPLE_ORIGIN}/{APPLE_LOCALE}/shop/account"

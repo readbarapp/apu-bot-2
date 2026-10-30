@@ -16,13 +16,21 @@
         <p class="eyebrow">Hong Kong · Apple Store Pickup</p>
         <h1>iPhone 自動搶購控制台</h1>
       </div>
-      <div id="run-pill" class="pill idle">未啟動 · 等待前端指令</div>
+      <div id="run-pill" class="pill idle">待命 · 等待前端指令</div>
     </header>
+
+    <ol class="flow" aria-label="初次設定流程">
+      <li><strong>1. 設定 Worker</strong>揀機型、門市、數量，每個 Worker 用唔同 session 資料夾（一個資料夾 = 一個 Apple ID）。</li>
+      <li><strong>2. 儲存設定</strong>撳綠色「儲存設定」。全域啟動只會用已儲存嘅 Worker。</li>
+      <li><strong>3. 登入 Apple ID</strong>撳該 Worker 嘅「登入 Apple ID」，視窗會帶到最前並打開登入頁。登入成功後先會顯示電郵，狀態變成待命。</li>
+      <li><strong>4. 開始搶機</strong>待命之後先可以「開始運作」或「全域啟動」。搶夠上限會自動停；停止運作唔會登出。</li>
+    </ol>
+    <div id="run-lock" class="run-lock" hidden>有 Worker 正在搶機：嗰粒嘅設定已鎖定。其他 Worker 仍可登入、開始或停止運作。緊急停止會關閉全部瀏覽器。</div>
 
     <section class="global" aria-label="全域控制面板">
       <div class="global-copy">
         <h2>全域控制面板</h2>
-        <p>請先喺下面改好 Worker、撳「儲存設定」，再按全域啟動。後台唔會自行開跑。</p>
+        <p>請先儲存、登入 Apple ID 變成待命，再按開始運作或全域啟動。後台唔會自行開跑。</p>
       </div>
       <label class="switch">
         <input type="checkbox" id="test-mode" checked />
@@ -42,7 +50,7 @@
         <div class="panel-head">
           <div>
             <h2>Worker Profiles</h2>
-            <p>每個 Worker 使用獨立瀏覽器與 Apple ID session。改完設定要先儲存，先至可以全域啟動。</p>
+            <p>每個 Worker 獨立 Apple ID。未登入會顯示登入掣；登入後先係待命，再按開始／停止運作。</p>
           </div>
           <div class="panel-actions">
             <button type="button" id="btn-save" class="btn save">儲存設定</button>
@@ -50,7 +58,7 @@
           </div>
         </div>
         <p id="save-hint" class="save-hint dirty">尚未儲存。請先按「儲存設定」，再按全域啟動。</p>
-        <div id="worker-list"></div>
+        <div id="worker-list" class="worker-list"></div>
       </section>
 
       <section class="panel logs" aria-label="Live Logs">
