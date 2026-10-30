@@ -9,6 +9,9 @@ from bot.catalogs import STORE_BY_ID
 PickupWindow = Literal["1d", "2d", "3d"]
 WorkerStatus = Literal[
     "idle",
+    "needs_login",
+    "logging_in",
+    "ready",
     "launching",
     "watching",
     "checking_out",
@@ -53,6 +56,11 @@ class WorkerProfile(BaseModel):
         return stores
 
 
+class WorkerActionRequest(BaseModel):
+    test_mode: bool = True
+    worker: WorkerProfile
+
+
 class StartRequest(BaseModel):
     test_mode: bool = True
     workers: list[WorkerProfile] = Field(min_length=1)
@@ -77,8 +85,12 @@ class WorkerPublicState(BaseModel):
     pickup_window: PickupWindow
     max_qty: int
     purchased: int = 0
-    status: WorkerStatus = "idle"
+    status: WorkerStatus = "needs_login"
     last_message: str = ""
+    apple_id: str | None = None
+    logged_in: bool = False
+    sniping: bool = False
+    browser_open: bool = False
 
 
 class StatusResponse(BaseModel):

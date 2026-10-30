@@ -8,7 +8,10 @@
   const STORAGE_MODE = "hkIphoneBot.testMode";
   const PREVIEW_ALERT = "而家係預覽模式：新增／刪除 Worker、改機型、加 SKU、儲存設定都可以試。真正開瀏覽器搶購，請用 Python 開後台後打開 http://127.0.0.1:8765";
   const STATUS_LABELS = {
-    idle: "待命（未啟動）",
+    idle: "未登入 Apple ID",
+    needs_login: "未登入 Apple ID",
+    logging_in: "等待登入中",
+    ready: "待命（已登入）",
     launching: "正在開啟瀏覽器",
     watching: "監控庫存中",
     checking_out: "正在結帳",
@@ -107,9 +110,12 @@
       stores: ["R428"],
       pickup_window: "1d",
       max_qty: 1,
-      status: "idle",
+      status: "needs_login",
       last_message: "",
       purchased: 0,
+      apple_id: "",
+      logged_in: false,
+      sniping: false,
     };
   }
 
@@ -159,6 +165,7 @@
     if (!cards.length) return;
     state.workers = cards.map((card) => {
       const stores = [...card.querySelectorAll(".store:checked")].map((box) => box.value);
+      const prev = state.workers.find((item) => item.id === card.dataset.id) || {};
       return {
         id: card.dataset.id,
         name: card.querySelector(".name").value.trim(),
@@ -167,9 +174,12 @@
         stores,
         pickup_window: card.querySelector(".pickup").value,
         max_qty: Number(card.querySelector(".qty").value || 1),
-        status: card.dataset.status || "idle",
-        last_message: card.dataset.message || "",
-        purchased: Number(card.dataset.purchased || 0),
+        status: card.dataset.status || prev.status || "needs_login",
+        last_message: card.dataset.message || prev.last_message || "",
+        purchased: Number(card.dataset.purchased || prev.purchased || 0),
+        apple_id: prev.apple_id || "",
+        logged_in: Boolean(prev.logged_in || prev.apple_id),
+        sniping: Boolean(prev.sniping),
       };
     });
     persistDraft();
@@ -182,20 +192,43 @@
       : "關閉時只要偵測到貨就會真實結帳並可能信用卡扣款。";
   }
 
+  function anyBrowserOpen() {
+    return state.workers.some((worker) => (
+      worker.sniping
+      || worker.logged_in
+      || worker.browser_open
+      || worker.status === "logging_in"
+      || worker.status === "launching"
+      || worker.status === "ready"
+      || worker.status === "watching"
+      || worker.status === "checking_out"
+    ));
+  }
+
   function setRunning(running, testMode) {
     state.running = running;
-    els.start.disabled = running;
-    els.stop.disabled = !running;
-    els.add.disabled = running;
-    if (els.save) els.save.disabled = running;
-    els.testMode.disabled = running;
+    els.start.disabled = false;
+    els.stop.disabled = !running && !anyBrowserOpen();
+    els.add.disabled = false;
+    if (els.save) els.save.disabled = false;
+    els.testMode.disabled = false;
     if (els.workersPanel) els.workersPanel.classList.toggle("is-running", running);
     if (els.runLock) els.runLock.hidden = !running;
-    els.list.querySelectorAll("input, select, button.add-sku, button.remove, button.clone").forEach((node) => {
-      node.disabled = running;
-    });
-    els.list.querySelectorAll("button.focus").forEach((node) => {
-      node.disabled = !running;
+    els.list.querySelectorAll(".worker-card").forEach((card) => {
+      const sniping = card.dataset.sniping === "true";
+      card.classList.toggle("is-sniping", sniping);
+      card.querySelectorAll("input, select, button.add-sku, button.remove, button.clone").forEach((node) => {
+        node.disabled = sniping;
+      });
+      const loggedIn = card.dataset.loggedIn === "true";
+      const runBtn = card.querySelector(".run-one");
+      const pauseBtn = card.querySelector(".pause-one");
+      const loginBtn = card.querySelector(".login");
+      const focusBtn = card.querySelector(".focus");
+      if (runBtn) runBtn.disabled = !loggedIn || sniping;
+      if (pauseBtn) pauseBtn.disabled = !sniping;
+      if (loginBtn) loginBtn.disabled = false;
+      if (focusBtn) focusBtn.disabled = false;
     });
     if (running && testMode === false) {
       els.pill.className = "pill live";
@@ -238,12 +271,20 @@
   }
 
   function workerCardHtml(worker, entering) {
-    const status = worker.status || "idle";
+    const status = worker.status || (worker.logged_in ? "ready" : "needs_login");
+    const sniping = Boolean(worker.sniping);
+    const loggedIn = Boolean(worker.logged_in || worker.apple_id);
+    const email = worker.apple_id || "";
     return `
-      <article class="worker-card${entering ? " enter" : ""}" data-id="${esc(worker.id)}" data-status="${esc(status)}" data-message="${esc(worker.last_message || "")}" data-purchased="${esc(worker.purchased || 0)}">
+      <article class="worker-card${entering ? " enter" : ""}${sniping ? " is-sniping" : ""}" data-id="${esc(worker.id)}" data-status="${esc(status)}" data-message="${esc(worker.last_message || "")}" data-purchased="${esc(worker.purchased || 0)}" data-sniping="${sniping}" data-logged-in="${loggedIn}">
         <div class="worker-top">
           <strong class="worker-title">${esc(worker.name)}</strong>
           <span class="badge ${esc(status)}">${esc(statusLabel(status))}${worker.purchased ? ` · ${worker.purchased}/${worker.max_qty}` : ""}</span>
+        </div>
+        <div class="account-bar ${loggedIn ? "is-in" : "is-out"}">
+          <span>Apple ID</span>
+          <strong class="account-email">${loggedIn ? esc(email || "已登入") : "未登入"}</strong>
+          <button type="button" class="btn login">${loggedIn ? "重新登入 / 帶到最前" : "登入 Apple ID"}</button>
         </div>
         <div class="grid">
           <label class="field">
@@ -278,7 +319,9 @@
           </label>
         </div>
         <div class="card-actions">
-          <button type="button" class="btn focus" ${state.running ? "" : "disabled"}>顯示此 Worker 視窗</button>
+          <button type="button" class="btn run-one" ${loggedIn && !sniping ? "" : "disabled"}>開始運作</button>
+          <button type="button" class="btn pause-one" ${sniping ? "" : "disabled"}>停止運作</button>
+          <button type="button" class="btn focus">顯示此 Worker 視窗</button>
           <button type="button" class="btn clone">複製做新 Apple ID</button>
           <button type="button" class="btn remove">刪除此 Worker</button>
         </div>
@@ -306,9 +349,14 @@
   function patchWorkerStatus(worker) {
     const card = els.list.querySelector(`[data-id="${CSS.escape(worker.id)}"]`);
     if (!card) return;
-    const status = worker.status || "idle";
+    const status = worker.status || "needs_login";
+    const sniping = Boolean(worker.sniping);
+    const loggedIn = Boolean(worker.logged_in || worker.apple_id);
     card.dataset.status = status;
     card.dataset.purchased = String(worker.purchased || 0);
+    card.dataset.sniping = String(sniping);
+    card.dataset.loggedIn = String(loggedIn);
+    card.classList.toggle("is-sniping", sniping);
     const badge = card.querySelector(".badge");
     if (badge) {
       badge.className = `badge ${status}`;
@@ -316,6 +364,19 @@
     }
     const title = card.querySelector(".worker-title");
     if (title && worker.name) title.textContent = worker.name;
+    const email = card.querySelector(".account-email");
+    if (email) email.textContent = loggedIn ? (worker.apple_id || "已登入") : "未登入";
+    const accountBar = card.querySelector(".account-bar");
+    if (accountBar) {
+      accountBar.classList.toggle("is-in", loggedIn);
+      accountBar.classList.toggle("is-out", !loggedIn);
+    }
+    const loginBtn = card.querySelector(".login");
+    if (loginBtn) loginBtn.textContent = loggedIn ? "重新登入 / 帶到最前" : "登入 Apple ID";
+    const runBtn = card.querySelector(".run-one");
+    const pauseBtn = card.querySelector(".pause-one");
+    if (runBtn) runBtn.disabled = !loggedIn || sniping;
+    if (pauseBtn) pauseBtn.disabled = !sniping;
   }
 
   function refreshSkuDropdowns(selectId, sku) {
@@ -356,19 +417,20 @@
 
   function applyStatus(data) {
     if (!data) return;
-    setRunning(Boolean(data.running), data.test_mode);
-    if (!Array.isArray(data.workers) || !data.workers.length) return;
-    const byId = new Map(data.workers.map((item) => [item.id, item]));
-    state.workers = state.workers.map((worker) => ({ ...worker, ...(byId.get(worker.id) || {}) }));
-    data.workers.forEach((item) => {
-      if (!state.workers.some((worker) => worker.id === item.id)) {
-        state.workers.push(item);
-        if (!els.list.querySelector(`[data-id="${CSS.escape(item.id)}"]`)) {
-          mountWorker(item);
+    if (Array.isArray(data.workers) && data.workers.length) {
+      const byId = new Map(data.workers.map((item) => [item.id, item]));
+      state.workers = state.workers.map((worker) => ({ ...worker, ...(byId.get(worker.id) || {}) }));
+      data.workers.forEach((item) => {
+        if (!state.workers.some((worker) => worker.id === item.id)) {
+          state.workers.push(item);
+          if (!els.list.querySelector(`[data-id="${CSS.escape(item.id)}"]`)) {
+            mountWorker(item);
+          }
         }
-      }
-      patchWorkerStatus({ ...item, ...(state.workers.find((worker) => worker.id === item.id) || {}) });
-    });
+        patchWorkerStatus({ ...item, ...(state.workers.find((worker) => worker.id === item.id) || {}) });
+      });
+    }
+    setRunning(Boolean(data.running), data.test_mode);
   }
 
   function enterPreviewMode(reason) {
@@ -387,7 +449,6 @@
   }
 
   function saveSettings() {
-    if (state.running) return false;
     readCardsIntoState();
     for (const worker of state.workers) {
       if (!worker.name || !worker.session_dir || !worker.sku || !worker.stores.length) {
@@ -451,6 +512,113 @@
     }
   }
 
+  function currentWorkerPayload(id) {
+    readCardsIntoState();
+    const worker = state.workers.find((item) => item.id === id);
+    if (!worker) throw new Error("找不到這個 Worker");
+    const { apple_id, logged_in, sniping, status, last_message, purchased, ...profile } = worker;
+    return {
+      test_mode: els.testMode.checked,
+      worker: {
+        id: profile.id,
+        name: profile.name,
+        session_dir: profile.session_dir,
+        sku: profile.sku,
+        stores: profile.stores,
+        pickup_window: profile.pickup_window,
+        max_qty: profile.max_qty,
+      },
+    };
+  }
+
+  async function loginWorker(id) {
+    if (state.previewMode) {
+      const worker = state.workers.find((item) => item.id === id);
+      if (worker) {
+        worker.apple_id = "preview.user@icloud.com";
+        worker.logged_in = true;
+        worker.status = "ready";
+        worker.browser_open = true;
+        patchWorkerStatus(worker);
+        setRunning(state.workers.some((item) => item.sniping), els.testMode.checked);
+      }
+      appendLog({
+        ts: new Date().toISOString(),
+        worker: worker ? worker.name : "frontend",
+        level: "success",
+        message: "預覽模式：模擬已登入 preview.user@icloud.com。真正登入請用 python app.py。",
+      });
+      return;
+    }
+    try {
+      applyStatus(await api("/api/workers/login", {
+        method: "POST",
+        body: JSON.stringify(currentWorkerPayload(id)),
+      }));
+    } catch (err) {
+      appendLog({ ts: new Date().toISOString(), worker: "frontend", level: "error", message: err.message });
+    }
+  }
+
+  async function runOne(id) {
+    const worker = state.workers.find((item) => item.id === id);
+    if (!worker || !(worker.logged_in || worker.apple_id)) {
+      window.alert("請先撳「登入 Apple ID」，登入成功變成待命後先可以開始運作。");
+      return;
+    }
+    if (!els.testMode.checked && !window.confirm(LIVE_CONFIRM)) {
+      appendLog({ ts: new Date().toISOString(), worker: "frontend", level: "warn", message: "使用者取消真實下單啟動" });
+      return;
+    }
+    if (state.previewMode) {
+      worker.sniping = true;
+      worker.status = "watching";
+      worker.last_message = "預覽模式：模擬開始運作。真正搶機請用 python app.py。";
+      patchWorkerStatus(worker);
+      setRunning(true, els.testMode.checked);
+      appendLog({
+        ts: new Date().toISOString(),
+        worker: worker.name,
+        level: "success",
+        message: "預覽模式：已模擬開始運作。真正開瀏覽器搶購請用 python app.py。",
+      });
+      return;
+    }
+    try {
+      applyStatus(await api("/api/workers/run", {
+        method: "POST",
+        body: JSON.stringify(currentWorkerPayload(id)),
+      }));
+    } catch (err) {
+      appendLog({ ts: new Date().toISOString(), worker: "frontend", level: "error", message: err.message });
+    }
+  }
+
+  async function pauseOne(id) {
+    if (state.previewMode) {
+      const worker = state.workers.find((item) => item.id === id);
+      if (worker) {
+        worker.sniping = false;
+        worker.status = worker.logged_in || worker.apple_id ? "ready" : "needs_login";
+        worker.last_message = "預覽模式：已停止運作。";
+        patchWorkerStatus(worker);
+      }
+      setRunning(state.workers.some((item) => item.sniping), els.testMode.checked);
+      appendLog({
+        ts: new Date().toISOString(),
+        worker: worker ? worker.name : "frontend",
+        level: "info",
+        message: "預覽模式：已模擬停止運作。登入狀態仍然保留。",
+      });
+      return;
+    }
+    try {
+      applyStatus(await api(`/api/workers/${encodeURIComponent(id)}/pause`, { method: "POST" }));
+    } catch (err) {
+      appendLog({ ts: new Date().toISOString(), worker: "frontend", level: "error", message: err.message });
+    }
+  }
+
   async function focusWorker(id) {
     if (state.previewMode) {
       window.alert(PREVIEW_ALERT);
@@ -482,16 +650,28 @@
   }
 
   els.list.addEventListener("input", () => {
-    if (!state.running) readCardsIntoState();
+    readCardsIntoState();
   });
   els.list.addEventListener("change", () => {
-    if (!state.running) readCardsIntoState();
+    readCardsIntoState();
   });
   els.list.addEventListener("click", (event) => {
     const card = event.target.closest(".worker-card");
     if (!card) return;
+    if (event.target.closest(".login")) {
+      loginWorker(card.dataset.id);
+      return;
+    }
+    if (event.target.closest(".run-one")) {
+      runOne(card.dataset.id);
+      return;
+    }
+    if (event.target.closest(".pause-one")) {
+      pauseOne(card.dataset.id);
+      return;
+    }
     if (event.target.closest(".remove")) {
-      if (state.running) return;
+      if (card.dataset.sniping === "true") return;
       const remaining = state.workers.filter((worker) => worker.id !== card.dataset.id);
       let closed = false;
       const finish = () => {
@@ -508,7 +688,7 @@
       window.setTimeout(finish, 280);
     }
     if (event.target.closest(".clone")) {
-      if (state.running) return;
+      if (card.dataset.sniping === "true") return;
       readCardsIntoState();
       const source = state.workers.find((item) => item.id === card.dataset.id);
       if (!source) return;
@@ -517,9 +697,12 @@
         id: uid(),
         name: `${source.name}_new`,
         session_dir: `session_${Date.now()}`,
-        status: "idle",
+        status: "needs_login",
         purchased: 0,
         last_message: "",
+        apple_id: "",
+        logged_in: false,
+        sniping: false,
       };
       state.workers.push(copy);
       persistDraft();
@@ -560,7 +743,6 @@
   els.stop.addEventListener("click", stop);
   if (els.save) els.save.addEventListener("click", saveSettings);
   els.add.addEventListener("click", () => {
-    if (state.running) return;
     readCardsIntoState();
     const worker = defaultWorker(state.workers.length);
     state.workers.push(worker);

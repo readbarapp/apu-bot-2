@@ -26,6 +26,9 @@ class BotManager:
         self._lock = asyncio.Lock()
         self._started: StartRequest | None = None
 
+    def _refresh_running(self) -> None:
+        self.running = any(worker.sniping for worker in self.workers.values())
+
     def status(self) -> dict:
         workers = [worker.snapshot() for worker in self.workers.values()]
         if not workers and self._started:
@@ -39,8 +42,12 @@ class BotManager:
                     "pickup_window": item.pickup_window,
                     "max_qty": item.max_qty,
                     "purchased": 0,
-                    "status": "idle",
+                    "status": "needs_login",
                     "last_message": "",
+                    "apple_id": None,
+                    "logged_in": False,
+                    "sniping": False,
+                    "browser_open": False,
                 }
                 for item in self._started.workers
             ]
@@ -50,32 +57,6 @@ class BotManager:
             "workers": workers,
         }
 
-    async def start(self, request: StartRequest) -> dict:
-        async with self._lock:
-            if self.running:
-                raise EngineError("系統已在運行中，請先緊急停止", 409)
-            self.running = True
-            self.test_mode = request.test_mode
-            self._started = request
-            self.workers = {}
-            self.tasks = []
-
-        hub.info("system", "前端已發出全域啟動指令")
-        if request.test_mode:
-            hub.info("system", "測試模式開啟：偵測到貨源時會停在最後一步，不會扣款下單")
-        else:
-            hub.warn("system", "真實下單模式：偵測到符合條件的貨源時將自動送出訂單並可能信用卡扣款")
-
-        try:
-            await self._boot(request.workers)
-        except Exception as exc:
-            await self.stop(reason=f"啟動失敗：{exc}")
-            raise EngineError(f"啟動失敗：{exc}", 500) from exc
-
-        await self.bring_all_to_front()
-        hub.success("system", "所有 Worker 瀏覽器視窗已嘗試帶到最前方")
-        return self.status()
-
     async def _ensure_playwright(self) -> None:
         if self._playwright is not None:
             return
@@ -83,41 +64,101 @@ class BotManager:
 
         self._playwright = await async_playwright().start()
 
-    async def _boot(self, profiles: list[WorkerProfile]) -> None:
+    async def _upsert(self, profile: WorkerProfile, test_mode: bool) -> Worker:
         await self._ensure_playwright()
-        for index, profile in enumerate(profiles):
-            worker = self.worker_cls(
-                profile,
-                test_mode=self.test_mode,
-                playwright=self._playwright,
-                index=index,
-            )
-            self.workers[profile.id] = worker
-            self.tasks.append(asyncio.create_task(worker.run(), name=f"worker-{profile.name}"))
+        existing = self.workers.get(profile.id)
+        if existing:
+            if not existing.sniping:
+                existing.profile = profile
+            existing.test_mode = test_mode
+            existing._playwright = self._playwright
+            return existing
+        worker = self.worker_cls(
+            profile,
+            test_mode=test_mode,
+            playwright=self._playwright,
+            index=len(self.workers),
+        )
+        self.workers[profile.id] = worker
+        return worker
 
-        async def wait_ready(worker: Worker) -> None:
+    def _get(self, worker_id: str) -> Worker:
+        worker = self.workers.get(worker_id)
+        if not worker:
+            raise EngineError("找不到這個 Worker。請先儲存設定，再登入或啟動。", 404)
+        return worker
+
+    async def login_worker(self, profile: WorkerProfile, test_mode: bool) -> dict:
+        self.test_mode = test_mode
+        worker = await self._upsert(profile, test_mode)
+        await worker.open_login()
+        return self.status()
+
+    async def run_worker(self, profile: WorkerProfile, test_mode: bool) -> dict:
+        self.test_mode = test_mode
+        worker = await self._upsert(profile, test_mode)
+        try:
+            await worker.start_sniping()
+        except RuntimeError as exc:
+            raise EngineError(str(exc), 409) from exc
+        self._refresh_running()
+        return self.status()
+
+    async def pause_worker(self, worker_id: str) -> dict:
+        worker = self._get(worker_id)
+        await worker.stop_sniping()
+        self._refresh_running()
+        return self.status()
+
+    async def start(self, request: StartRequest) -> dict:
+        self.test_mode = request.test_mode
+        self._started = request
+        hub.info("system", "前端已發出全域啟動指令")
+        if request.test_mode:
+            hub.info("system", "測試模式開啟：偵測到貨源時會停在最後一步，不會扣款下單")
+        else:
+            hub.warn("system", "真實下單模式：偵測到符合條件的貨源時將自動送出訂單並可能信用卡扣款")
+
+        ready: list[Worker] = []
+        for profile in request.workers:
+            worker = await self._upsert(profile, request.test_mode)
+            if not worker.apple_id and worker.context is not None:
+                try:
+                    await worker.refresh_account()
+                except Exception as exc:
+                    hub.warn(worker.profile.name, f"檢查登入狀態失敗：{exc}")
+            if worker.apple_id:
+                ready.append(worker)
+            else:
+                hub.warn(worker.profile.name, "尚未登入 Apple ID，全域啟動會跳過此 Worker")
+
+        if not ready:
+            raise EngineError("尚未有 Worker 完成 Apple ID 登入。請先撳「登入 Apple ID」，登入成功變成待命後再全域啟動。", 409)
+
+        for worker in ready:
             try:
-                await asyncio.wait_for(worker.ready_event.wait(), timeout=45)
-            except TimeoutError as exc:
-                raise RuntimeError(f"{worker.profile.name} 瀏覽器啟動逾時") from exc
-            if worker.status == "error":
-                raise RuntimeError(worker.last_message or f"{worker.profile.name} 啟動失敗")
+                await worker.start_sniping()
+            except RuntimeError as exc:
+                hub.warn(worker.profile.name, str(exc))
 
-        await asyncio.gather(*(wait_ready(worker) for worker in self.workers.values()))
+        self._refresh_running()
+        await self.bring_all_to_front()
+        hub.success("system", f"已開始 {sum(1 for worker in ready if worker.sniping)} 個已登入 Worker 搶購")
+        return self.status()
 
     async def bring_all_to_front(self) -> None:
         for worker in self.workers.values():
+            if worker.context is None:
+                continue
             try:
                 await worker.bring_to_front()
             except Exception as exc:
                 hub.warn(worker.profile.name, f"無法將視窗帶到最前：{exc}")
 
     async def focus_worker(self, worker_id: str) -> dict:
-        worker = self.workers.get(worker_id)
-        if not worker:
-            raise EngineError("找不到這個 Worker", 404)
+        worker = self._get(worker_id)
         if worker.context is None:
-            raise EngineError("此 Worker 目前沒有開啟的瀏覽器視窗", 409)
+            raise EngineError("此 Worker 目前沒有開啟的瀏覽器視窗。請先撳「登入 Apple ID」。", 409)
         await worker.bring_to_front()
         hub.info(worker.profile.name, "前端要求顯示此 Worker 視窗")
         return {"ok": True, "id": worker_id}
@@ -126,7 +167,8 @@ class BotManager:
         async with self._lock:
             hub.warn("system", reason)
             workers = list(self.workers.values())
-            tasks = list(self.tasks)
+            tasks = [worker._snipe_task for worker in workers if worker._snipe_task]
+            login_tasks = [worker._login_task for worker in workers if worker._login_task]
             playwright = self._playwright
             self.running = False
             self.tasks = []
@@ -134,15 +176,17 @@ class BotManager:
 
         for worker in workers:
             worker.stop_event.set()
+            worker.snipe_stop.set()
         for worker in workers:
             try:
                 await worker.shutdown()
             except Exception:
                 pass
-        for task in tasks:
+        pending = [task for task in tasks + login_tasks if task and not task.done()]
+        for task in pending:
             task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         if playwright is not None:
             try:
                 await playwright.stop()

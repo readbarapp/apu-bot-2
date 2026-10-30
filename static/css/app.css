@@ -285,10 +285,10 @@ h2 { font-size: 16px; }
 .worker-card.enter { animation: rise-in 360ms var(--ease) both; }
 .worker-card.leave { animation: rise-out 220ms var(--ease) forwards; pointer-events: none; }
 
-.workers.is-running .worker-card .grid,
-.workers.is-running .worker-card .remove,
-.workers.is-running .worker-card .clone,
-.workers.is-running .worker-card .add-sku {
+.worker-card.is-sniping .grid,
+.worker-card.is-sniping .remove,
+.worker-card.is-sniping .clone,
+.worker-card.is-sniping .add-sku {
   pointer-events: none;
   opacity: 0.5;
 }
@@ -301,6 +301,29 @@ h2 { font-size: 16px; }
   margin-bottom: 12px;
 }
 
+.account-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 13px;
+}
+
+.account-bar.is-in { border-color: rgba(34, 197, 94, 0.4); background: rgba(34, 197, 94, 0.06); }
+.account-bar.is-out { border-color: rgba(245, 158, 11, 0.4); background: rgba(245, 158, 11, 0.06); }
+.account-bar span { color: var(--muted); }
+.account-email { color: var(--text); word-break: break-all; }
+.account-bar.is-in .account-email { color: var(--green); }
+.account-bar.is-out .account-email { color: var(--amber); }
+.btn.login { min-height: 36px; background: rgba(59, 130, 246, 0.16); border-color: rgba(59, 130, 246, 0.45); color: #bfdbfe; margin-left: auto; }
+.btn.run-one { background: var(--blue); color: #fff; }
+.btn.pause-one { background: transparent; border-color: rgba(244, 63, 94, 0.45); color: #fda4af; }
+
 .badge {
   font-size: 12px;
   padding: 4px 10px;
@@ -311,7 +334,8 @@ h2 { font-size: 16px; }
   transition: color 180ms var(--ease), border-color 180ms var(--ease);
 }
 
-.badge.idle { color: #93c5fd; border-color: rgba(59, 130, 246, 0.4); }
+.badge.idle, .badge.needs_login, .badge.logging_in { color: var(--amber); border-color: rgba(245, 158, 11, 0.45); }
+.badge.ready { color: var(--green); border-color: rgba(34, 197, 94, 0.45); }
 .badge.watching, .badge.launching { color: var(--blue); border-color: rgba(59, 130, 246, 0.45); }
 .badge.checking_out { color: var(--amber); border-color: rgba(245, 158, 11, 0.45); }
 .badge.completed, .badge.dry_run_paused, .badge.success { color: var(--green); border-color: rgba(34, 197, 94, 0.45); }
