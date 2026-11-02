@@ -26,14 +26,18 @@ from bot.checkout import (
     VIEW_BAG_PATTERN,
     _click_add_to_bag,
     _continue_as_guest,
+    PICKUP_DETAILS_CONTINUE_PATTERN,
     _apply_pickup_location,
     _click_earliest_slot,
+    _fill_phone,
     _guest_nav_done,
     _still_on_signin,
     guest_block_extra,
     _decline_tradein_and_applecare,
     _fill_card_expiry,
+    _fill_contact,
     _fill_guest,
+    hk_phone_number,
     _set_bag_quantity,
     block_report,
     card_month_options,
@@ -136,6 +140,9 @@ def test_card_expiry_prefers_two_digit_year_for_apple_mm_yy() -> None:
     assert mm_yy("1", "28") == "01/28"
     assert "2028" not in mm_yy("12", "2028")
     assert mm_yy("", "2028") == ""
+    assert hk_phone_number("51234567") == "51234567"
+    assert hk_phone_number("+852 5123 4567") == "51234567"
+    assert hk_phone_number("85251234567") == "51234567"
 
 
 class _FakeExpiryHandle:
@@ -663,6 +670,8 @@ def test_product_option_patterns_match_current_apple_hk_labels() -> None:
     assert not CHECKOUT_PATTERN.search("使用 Apple Pay 結帳")
     assert CONTINUE_PATTERN.search("繼續前往付款")
     assert CONTINUE_PATTERN.search("繼續前往取貨詳情")
+    assert PICKUP_DETAILS_CONTINUE_PATTERN.search("繼續前往取貨詳情")
+    assert not PICKUP_DETAILS_CONTINUE_PATTERN.search("繼續前往付款")
     assert CONTINUE_PATTERN.search("繼續前往送貨詳情")
     assert not CONTINUE_PATTERN.search("我希望送貨")
     assert not CONTINUE_PATTERN.search("我會前來取貨")
@@ -684,11 +693,27 @@ class _FakePickupPage:
         self.typed: list[str] = []
         self.clicks: list[str] = []
         self.value = ""
+        self.stores_listed = mode == "already_applied"
         self.keyboard = self
+
+    def _store_list_text(self, name) -> bool:
+        text = str(getattr(name, "pattern", name) or "")
+        return bool(
+            re.search(
+                r"正在顯示|ifc mall|Apple Store|Hysan|Festival Walk|Canton Road|"
+                r"New Town Plaza|apm Hong Kong|取貨地點",
+                text,
+                re.I,
+            )
+        )
 
     def _visible(self, kind: str, name) -> bool:
         if self.mode == "missing":
             return False
+        if self.mode == "already_applied":
+            return kind == "text" and self._store_list_text(name)
+        if kind == "text" and self._store_list_text(name):
+            return self.stores_listed
         if self.mode == "placeholder":
             return True
         text = str(getattr(name, "pattern", name) or "")
@@ -759,7 +784,18 @@ class _FakePickupControl:
     async def click(self, **_kwargs) -> None:
         if not self._visible():
             raise TimeoutError(self._kind)
-        self._page.clicks.append(str(getattr(self._name, "pattern", self._name)))
+        name = str(getattr(self._name, "pattern", self._name))
+        self._page.clicks.append(name)
+        if "套用" in name or "Apply" in name or "search-button" in name.lower() or "searchButton" in name:
+            self._page.stores_listed = True
+
+    async def get_attribute(self, name: str) -> str:
+        if name == "type":
+            return "text"
+        return ""
+
+    async def evaluate(self, _script: str) -> str:
+        return "input"
 
     async def type(self, value: str, **_kwargs) -> None:
         await self.fill(value)
@@ -800,6 +836,90 @@ async def test_apply_pickup_location_reports_missing_district_field() -> None:
     page = _FakePickupPage(mode="missing")
     assert await _apply_pickup_location(page, timeout=400) is False
     assert page.filled == []
+
+
+@pytest.mark.asyncio
+async def test_apply_pickup_location_skips_when_stores_already_listed() -> None:
+    page = _FakePickupPage(mode="already_applied")
+    assert await _apply_pickup_location(page, timeout=400) is True
+    assert page.filled == []
+
+
+class _FakeContactPage:
+    def __init__(self) -> None:
+        self.filled: dict[str, str] = {}
+        self.clicks: list[str] = []
+
+    def locator(self, selector: str):
+        if re.search(r"tel|phone|fullDaytimePhone", selector, re.I):
+            return _FakeContactHandle(self, "phone", "tel")
+        return _FakeContactHandle(self, "missing", "text")
+
+    def get_by_label(self, pattern):
+        text = pattern.pattern if hasattr(pattern, "pattern") else str(pattern)
+        if re.search(text, "我沒有手提電話號碼"):
+            return _FakeContactHandle(self, "no_mobile", "checkbox")
+        if re.search(text, "手提電話號碼"):
+            return _FakeContactHandle(self, "phone", "tel")
+        return _FakeContactHandle(self, "missing", "text")
+
+    def get_by_placeholder(self, pattern):
+        return self.get_by_label(pattern)
+
+    def get_by_role(self, _role, name=None, **_kwargs):
+        return self.get_by_label(name or _role)
+
+    def get_by_text(self, pattern, **_kwargs):
+        return self.get_by_label(pattern)
+
+
+class _FakeContactHandle:
+    def __init__(self, page: _FakeContactPage, kind: str, input_type: str) -> None:
+        self._page = page
+        self._kind = kind
+        self._type = input_type
+        self.first = self
+
+    async def wait_for(self, **_kwargs) -> None:
+        if self._kind == "missing":
+            raise TimeoutError(self._kind)
+
+    async def get_attribute(self, name: str) -> str:
+        if name == "type":
+            return self._type
+        return ""
+
+    async def evaluate(self, _script: str) -> str:
+        return "input"
+
+    async def click(self, **_kwargs) -> None:
+        self._page.clicks.append(self._kind)
+
+    async def fill(self, value: str, **_kwargs) -> None:
+        if self._type in {"checkbox", "radio"}:
+            raise RuntimeError("cannot fill checkbox")
+        self._page.filled[self._kind] = value
+
+
+@pytest.mark.asyncio
+async def test_fill_phone_uses_tel_input_not_no_mobile_checkbox() -> None:
+    page = _FakeContactPage()
+    assert await _fill_phone(page, "+852 5123 4567") is True
+    assert page.filled["phone"] == "51234567"
+    assert "no_mobile" not in page.clicks
+
+
+@pytest.mark.asyncio
+async def test_fill_contact_fills_phone() -> None:
+    page = _FakeContactPage()
+    guest = GuestProfile(
+        last_name="testing",
+        first_name="testing",
+        email="testing@gmail.com",
+        phone="51234567",
+    )
+    await _fill_contact(page, guest)
+    assert page.filled["phone"] == "51234567"
 
 
 class _FakeSlotPage:
@@ -1052,7 +1172,7 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "delivery-days" in js
     assert "訪客模式請填妥" in js
     assert "填晒先可以儲存同開始運作" in js
-    assert "可以再改再存" in js
+    assert "都可以再撳「儲存此 Worker」" in js
     assert "guestHasMaskedCard" in js
     assert "guestHasStoredCard" in js
     assert "已儲存信用卡" in js
@@ -1062,6 +1182,10 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "而家未有 Worker。請撳「新增 Worker」加入搶購程序。" in js
     assert "session_${short}" in js
     assert "訪客資料已修改成功" in js
+    assert "document.activeElement !== cardInput" in js
+    assert "document.activeElement !== cvvInput" in js
+    assert "...incoming, guest" not in js
+    assert "incoming.guest" not in js
     assert "guestResave" in js
     assert "slice(-2)" in js
     assert "唔會填 12/2028" in js

@@ -78,7 +78,11 @@ class BotManager:
         missing = guest.missing_labels()
         if missing:
             raise EngineError(f"訪客模式請填妥：{'、'.join(missing)}", 400)
-        return profile.model_copy(update={"guest": guest})
+        updated = profile.model_copy(update={"guest": guest})
+        existing = self.workers.get(profile.id)
+        if existing and not existing.sniping:
+            existing.profile = updated
+        return updated
 
     async def _upsert(self, profile: WorkerProfile, test_mode: bool) -> Worker:
         await self._ensure_playwright()
