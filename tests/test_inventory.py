@@ -12,6 +12,10 @@ HK = ZoneInfo("Asia/Hong_Kong")
 NOW = datetime(2026, 10, 30, 16, 0, tzinfo=HK)
 
 
+def test_hong_kong_timezone_loads() -> None:
+    assert HK.key == "Asia/Hong_Kong"
+
+
 def test_pickup_url_contains_sku_and_hk_location() -> None:
     url = pickup_url("MK2E4ZA/A")
     assert "pickup-message" in url
