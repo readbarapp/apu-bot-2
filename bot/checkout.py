@@ -53,6 +53,36 @@ PICKUP_LOCATION_PATTERN = re.compile(
     r"地區|中環|城市|搜尋|search|retail|零售店|附近",
     re.I,
 )
+PICKUP_LOCATION_UI_PATTERN = re.compile(
+    r"了解你可在哪裡取貨|地區（例如|地區\(例如|輸入地區以查看|正在顯示以下地點附近",
+    re.I,
+)
+PICKUP_LOCATION_ERROR_PATTERN = re.compile(r"請輸入地區")
+PICKUP_STORE_LIST_PATTERN = re.compile(
+    r"Apple Store|ifc mall|Hysan Place|Canton Road|Festival Walk|"
+    r"New Town Plaza|apm Hong Kong|取貨地點",
+    re.I,
+)
+PICKUP_LOCATION_INPUT_SELECTORS = (
+    'input[data-autom*="storelocator" i], input[data-autom*="store-locator" i], '
+    'input[data-autom*="storeLocator" i]',
+    'input[data-autom*="searchInput" i], input[data-autom*="search-input" i], '
+    'input[data-autom*="store-search" i]',
+    'input[id*="storeLocator" i], input[id*="searchInput" i], '
+    'input[name*="storeLocator" i], input[name*="searchInput" i]',
+    'input[placeholder*="地區"], input[placeholder*="中環"], '
+    'input[aria-label*="地區" i], input[aria-label*="中環" i]',
+    'input[data-autom*="location" i], input[data-autom*="city" i], '
+    'input[name*="location" i], input[id*="location" i]',
+    'input[data-autom*="pickup" i]',
+)
+PICKUP_APPLY_SELECTOR = (
+    'button[data-autom*="storelocator" i], button[data-autom*="store-locator" i], '
+    'button[data-autom*="search-button" i], button[data-autom*="searchButton" i], '
+    '[data-autom*="storeLocator-search" i], [data-autom*="storelocator-search-button" i]'
+)
+GUEST_NAV_TIMEOUT_MS = 18_000
+RETRY_FULFILLMENT = "retry_fulfillment"
 GUEST_PATTERN = re.compile(
     r"以訪客身份繼續|訪客結帳|以訪客身份|Guest Checkout|Continue as Guest",
     re.I,
@@ -499,11 +529,30 @@ async def _click_guest_button(handle, timeout: int = 2500) -> None:
 def guest_block_extra(reason: str) -> str:
     if reason == "guest_button_missed":
         return "畫面停喺登入牆，搵唔到「以訪客身份繼續」。"
+    if reason == "guest_nav_timeout":
+        return "撳咗以訪客身份繼續之後頁面未跳去結帳。可改用 Apple ID 模式；唔好連撳訪客。"
     return "撳咗以訪客身份繼續之後被擋。可改用 Apple ID 模式；唔好連撳訪客。"
 
 
+def _still_on_signin(url: str) -> bool:
+    return bool(re.search(r"/shop/signIn(?:[/?#]|$)", url or "", re.I))
+
+
+def _guest_nav_done(url: str) -> bool:
+    text = url or ""
+    if checkout_is_blocked(text):
+        return True
+    if _still_on_signin(text):
+        return False
+    return bool(re.search(r"/shop/checkout|/shop/bag|/shop/buy", text, re.I))
+
+
 async def _continue_as_guest(page, timeout: int = 12000) -> str | None:
-    """Click Apple's guest checkout button. None means continue; a string is a stop reason."""
+    """Click Apple's guest checkout button.
+
+    None: left the sign-in wall. guest_clicked: clicked once, still waiting.
+    Other strings are stop reasons (blocked / button missed).
+    """
     if checkout_is_blocked(page.url):
         return "guest_blocked"
     if not re.search(r"signIn", page.url, re.I):
@@ -546,14 +595,14 @@ async def _continue_as_guest(page, timeout: int = 12000) -> str | None:
     if clicked:
         hub.info("checkout", "已撳「以訪客身份繼續」")
         try:
-            await page.wait_for_url(
-                re.compile(r"checkout|fulfillment|shipping|pickup|404|sorry|541", re.I),
-                timeout=8_000,
-            )
+            await page.wait_for_url(_guest_nav_done, timeout=GUEST_NAV_TIMEOUT_MS)
         except Exception:
             await asyncio.sleep(1.2)
-        if saw_block or checkout_is_blocked(page.url) or re.search(r"signIn", page.url, re.I):
+        if saw_block or checkout_is_blocked(page.url):
             return "guest_blocked"
+        if _still_on_signin(page.url):
+            hub.info("checkout", "已撳訪客，頁面仍喺登入牆，會繼續等跳去結帳，唔會再撳。")
+            return "guest_clicked"
         return None
     if checkout_is_blocked(page.url):
         return "guest_blocked"
@@ -827,43 +876,184 @@ async def _fill_guest(page, guest: GuestProfile | None) -> None:
     await _fill_billing(page, guest)
 
 
-async def _apply_pickup_location(page, query: str = PICKUP_LOCATION) -> bool:
-    """Apple HK hides pickup stores until a district is applied. Hong Kong lists all six."""
+async def _wait_for_pickup_location_ui(page, timeout: int = 8000) -> None:
     locators = [
+        page.get_by_text(PICKUP_LOCATION_UI_PATTERN),
+        page.get_by_role("button", name=APPLY_PATTERN),
+        *[page.locator(selector) for selector in PICKUP_LOCATION_INPUT_SELECTORS],
         page.get_by_placeholder(PICKUP_LOCATION_PATTERN),
         page.get_by_label(PICKUP_LOCATION_PATTERN),
-        page.locator(
-            'input[placeholder*="地區"], input[placeholder*="中環"], '
-            'input[data-autom*="location" i], input[data-autom*="city" i], '
-            'input[name*="location" i], input[id*="location" i]'
-        ),
     ]
-    filled = False
+    slice_timeout = max(200, min(timeout // max(len(locators), 1), 1500))
+    deadline = asyncio.get_running_loop().time() + max(timeout / 1000, 0.05)
+    while asyncio.get_running_loop().time() < deadline:
+        for locator in locators:
+            try:
+                await locator.first.wait_for(state="visible", timeout=slice_timeout)
+                return
+            except Exception:
+                continue
+        await asyncio.sleep(0.2)
+
+
+def _pickup_location_locators(page) -> list:
+    """Apple HK uses a store-search input; the 地區（例如「中環」）copy is often a floating label."""
+    return [
+        *[page.locator(selector) for selector in PICKUP_LOCATION_INPUT_SELECTORS],
+        page.get_by_placeholder(PICKUP_LOCATION_PATTERN),
+        page.get_by_label(PICKUP_LOCATION_PATTERN),
+        page.get_by_role("textbox", name=PICKUP_LOCATION_PATTERN),
+        page.get_by_role("combobox", name=PICKUP_LOCATION_PATTERN),
+        page.get_by_role("searchbox", name=PICKUP_LOCATION_PATTERN),
+    ]
+
+
+async def _read_input_value(handle) -> str | None:
+    try:
+        return str(await handle.input_value() or "")
+    except Exception:
+        return None
+
+
+def _value_has_query(current: str | None, query: str) -> bool:
+    if current is None:
+        return False
+    return query.lower() in current.lower()
+
+
+async def _focus_and_fill(handle, query: str) -> bool:
+    try:
+        await handle.click(timeout=1500)
+    except Exception:
+        pass
+    wrote = False
+    try:
+        await handle.fill(query, timeout=2000)
+        wrote = True
+        current = await _read_input_value(handle)
+        if current is None or _value_has_query(current, query):
+            return True
+    except Exception:
+        pass
+    for method_name in ("press_sequentially", "type"):
+        method = getattr(handle, method_name, None)
+        if method is None:
+            continue
+        try:
+            await method(query, delay=30, timeout=3000)
+            wrote = True
+            current = await _read_input_value(handle)
+            if current is None or _value_has_query(current, query):
+                return True
+        except Exception:
+            continue
+    try:
+        await handle.evaluate(
+            """(el, value) => {
+                el.focus();
+                el.value = value;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            }""",
+            query,
+        )
+        return True
+    except Exception:
+        return wrote
+
+
+async def _type_into_district_label(page, query: str) -> bool:
+    try:
+        label = page.get_by_text(re.compile(r"地區（例如|地區\(例如")).first
+        if not await _locator_is_visible(label):
+            return False
+        await label.click(timeout=1200)
+    except Exception:
+        return False
+    keyboard = getattr(page, "keyboard", None)
+    if keyboard is None:
+        return False
+    try:
+        await keyboard.type(query, delay=25)
+        return True
+    except Exception:
+        return False
+
+
+async def _click_pickup_apply(page) -> None:
+    locators = [
+        page.locator(PICKUP_APPLY_SELECTOR),
+        page.get_by_role("button", name=APPLY_PATTERN),
+    ]
     for locator in locators:
         try:
             handle = locator.first
-            await handle.wait_for(state="visible", timeout=1800)
-            await handle.fill(query, timeout=2000)
-            filled = True
-            break
+            await handle.wait_for(state="visible", timeout=1500)
+            await handle.click(timeout=2000)
+            return
         except Exception:
             continue
-    if not filled:
-        return False
     if not await _click_role(page, APPLY_PATTERN, timeout=2500):
         try:
             await page.keyboard.press("Enter")
         except Exception:
             pass
+
+
+async def _pickup_location_error_visible(page) -> bool:
     try:
-        await page.get_by_text(re.compile(r"Apple Store|ifc mall|Hysan|Festival Walk|取貨地點", re.I)).first.wait_for(
-            state="visible",
-            timeout=5000,
-        )
+        handle = page.get_by_text(PICKUP_LOCATION_ERROR_PATTERN).first
+        return await _locator_is_visible(handle)
     except Exception:
-        await asyncio.sleep(0.8)
-    hub.info("checkout", f"已填「{query}」並撳套用")
-    return True
+        return False
+
+
+async def _pickup_stores_visible(page, timeout: int = 3500) -> bool:
+    try:
+        await page.get_by_text(PICKUP_STORE_LIST_PATTERN).first.wait_for(
+            state="visible",
+            timeout=timeout,
+        )
+        return True
+    except Exception:
+        return False
+
+
+async def _apply_pickup_location(
+    page, query: str = PICKUP_LOCATION, timeout: int = 12_000
+) -> bool:
+    """Apple HK hides pickup stores until a district is applied. Hong Kong lists all six."""
+    await _wait_for_pickup_location_ui(page, timeout=min(timeout, 8000))
+    deadline = asyncio.get_running_loop().time() + max(timeout / 1000, 0.05)
+    filled = False
+    while asyncio.get_running_loop().time() < deadline:
+        for locator in _pickup_location_locators(page):
+            try:
+                handle = locator.first
+                await handle.wait_for(state="visible", timeout=800)
+                if await _focus_and_fill(handle, query):
+                    filled = True
+                    break
+            except Exception:
+                continue
+        if not filled:
+            filled = await _type_into_district_label(page, query)
+        if filled:
+            await _click_pickup_apply(page)
+            if await _pickup_stores_visible(page, timeout=3500):
+                hub.info("checkout", f"已填「{query}」並撳套用")
+                return True
+            if not await _pickup_location_error_visible(page):
+                await asyncio.sleep(0.6)
+                if await _pickup_stores_visible(page, timeout=2000):
+                    hub.info("checkout", f"已填「{query}」並撳套用")
+                    return True
+        await asyncio.sleep(0.25)
+    if filled:
+        hub.warn("checkout", f"已填「{query}」並撳套用，但門市清單未出現")
+        return True
+    hub.warn("checkout", f"搵唔到地區欄，未能填「{query}」")
+    return False
 
 
 async def _click_pickup_store(page, match: StockMatch, timeout: int = 4000) -> bool:
@@ -883,19 +1073,18 @@ async def _click_pickup_store(page, match: StockMatch, timeout: int = 4000) -> b
     return False
 
 
-async def _select_pickup_store(page, match: StockMatch, timeout: int) -> None:
+async def _select_pickup_store(page, match: StockMatch, timeout: int) -> bool:
     await _click_choice(page, PICKUP_PATTERN, timeout=timeout)
-    await _apply_pickup_location(page, PICKUP_LOCATION)
-    if await _click_pickup_store(page, match):
-        return
+    if await _apply_pickup_location(page, PICKUP_LOCATION) and await _click_pickup_store(page, match):
+        return True
     area = (STORE_BY_ID.get(match.store_id) or {}).get("area") or ""
     for query in (area, match.store_name):
         if not query:
             continue
-        await _apply_pickup_location(page, query)
-        if await _click_pickup_store(page, match):
-            return
+        if await _apply_pickup_location(page, query) and await _click_pickup_store(page, match):
+            return True
     hub.warn("checkout", f"未能自動點選門市 {match.store_name}，將繼續嘗試結帳步驟")
+    return False
 
 
 async def _click_earliest_slot(page) -> None:
@@ -946,7 +1135,8 @@ async def _handle_fulfillment(
         await _click_choice(page, DELIVERY_PATTERN, timeout=4000)
         return await _abort_if_delivery_too_slow(page, match, delivery_max_days)
 
-    await _select_pickup_store(page, match, timeout=4000)
+    if not await _select_pickup_store(page, match, timeout=4000):
+        return RETRY_FULFILLMENT
     await _click_earliest_slot(page)
     return None
 
@@ -1039,9 +1229,12 @@ async def run_checkout(
             return timer.result(False, "checkout_blocked", pause=True)
         timer.mark("enter_checkout")
 
+        guest_clicked = False
         if checkout_mode == "guest":
             blocked = await _continue_as_guest(page)
-            if blocked:
+            if blocked == "guest_clicked":
+                guest_clicked = True
+            elif blocked:
                 hub.error(
                     worker_name,
                     block_report(
@@ -1071,7 +1264,13 @@ async def run_checkout(
                 break
             stage = checkout_stage(page.url)
             if checkout_mode == "guest" and stage == "signin":
+                if guest_clicked:
+                    await asyncio.sleep(0.8)
+                    continue
                 blocked = await _continue_as_guest(page)
+                if blocked == "guest_clicked":
+                    guest_clicked = True
+                    continue
                 if blocked:
                     hub.error(
                         worker_name,
@@ -1093,6 +1292,11 @@ async def run_checkout(
                     guest,
                     delivery_max_days,
                 )
+                if skipped == RETRY_FULFILLMENT:
+                    if stage == "fulfillment":
+                        await asyncio.sleep(0.6)
+                        continue
+                    skipped = None
                 fulfillment_done = True
                 timer.mark("fulfillment")
                 if skipped:
@@ -1116,6 +1320,18 @@ async def run_checkout(
             else:
                 await _maybe_click(page, CONTINUE_PATTERN, timeout=CHECKOUT_STEP_TIMEOUT_MS)
             await asyncio.sleep(0.5)
+
+        if checkout_mode == "guest" and _still_on_signin(page.url):
+            hub.error(
+                worker_name,
+                block_report(
+                    "訪客結帳",
+                    page.url,
+                    await page_title(page),
+                    guest_block_extra("guest_nav_timeout"),
+                ),
+            )
+            return timer.result(False, "guest_nav_timeout", pause=True)
 
         if not await _on_place_order_step(page):
             raise CheckoutInterrupted("找不到付款前最後一步，可能被新頁面或手動操作打斷")
