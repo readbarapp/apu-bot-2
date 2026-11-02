@@ -700,3 +700,7 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "我會前來取貨" in readme
     assert "我希望送貨" in readme
     assert "Shipping-init" in readme
+    assert "訪客模式搶購流程" in readme
+    assert "PickupContact-init" in readme
+    assert "Billing-init" in readme
+    assert "step=attach" in readme
