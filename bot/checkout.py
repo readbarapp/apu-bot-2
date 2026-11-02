@@ -32,8 +32,14 @@ SKIP_PATTERN = re.compile(
 CONTINUE_PATTERN = re.compile(r"繼續前往付款|繼續結帳|^繼續$|^Continue$|Continue to Payment", re.I)
 REVIEW_ORDER_PATTERN = re.compile(r"檢查你的訂單|Review Your Order|Review Order", re.I)
 CREDIT_CARD_PATTERN = re.compile(r"信用卡或扣帳卡|Credit or Debit Card|Credit Card", re.I)
-PICKUP_PATTERN = re.compile(r"我會前來取貨|於 Apple Store 取貨|店內取貨|門市取貨|Pick up|取貨", re.I)
-DELIVERY_PATTERN = re.compile(r"我希望送貨|送貨上門|運送|送貨|Delivery|Ship|Home Delivery", re.I)
+PICKUP_PATTERN = re.compile(
+    r"我會前來取貨|於 Apple Store 取貨|店內取貨|I['’]?ll pick up|Pick up at",
+    re.I,
+)
+DELIVERY_PATTERN = re.compile(
+    r"我希望送貨|I want it delivered|I['’]?d like delivery|Ship to me",
+    re.I,
+)
 GUEST_PATTERN = re.compile(
     r"以訪客身份繼續|訪客結帳|以訪客身份|Guest Checkout|Continue as Guest",
     re.I,
@@ -51,7 +57,7 @@ FIELD_CANDIDATES = {
     "last_name": [r"姓氏", r"姓", r"Last Name", r"lastName", r"familyName"],
     "first_name": [r"名字", r"名(?!稱)", r"First Name", r"firstName", r"givenName"],
     "email": [r"電郵地址", r"電郵", r"電子郵件", r"Email", r"emailAddress"],
-    "phone": [r"電話號碼", r"電話", r"手機", r"Phone", r"Mobile", r"fullDaytimePhone"],
+    "phone": [r"手提電話", r"電話號碼", r"電話", r"手機", r"Phone", r"Mobile", r"fullDaytimePhone"],
     "address_street": [
         r"街道名稱及號碼",
         r"街道地址",
@@ -201,8 +207,10 @@ def checkout_is_blocked(url: str) -> bool:
 
 def checkout_stage(url: str) -> str:
     text = url or ""
-    if re.search(r"PickupContact|ShippingContact|Shipping-init", text, re.I):
+    if re.search(r"PickupContact", text, re.I):
         return "contact"
+    if re.search(r"Shipping-init|ShippingContact", text, re.I):
+        return "shipping"
     if re.search(r"Billing", text, re.I):
         return "billing"
     if re.search(r"Fulfillment", text, re.I):
@@ -607,6 +615,18 @@ async def _fill_contact(page, guest: GuestProfile | None) -> None:
         await _fill_labeled(page, FIELD_CANDIDATES[key], value)
 
 
+async def _fill_shipping(page, guest: GuestProfile | None) -> None:
+    """Shipping-init: name, two-line address, region HK, then email and phone."""
+    if guest is None:
+        return
+    await _fill_labeled(page, FIELD_CANDIDATES["last_name"], guest.last_name)
+    await _fill_labeled(page, FIELD_CANDIDATES["first_name"], guest.first_name)
+    await _select_hong_kong(page)
+    await _fill_address(page, guest)
+    await _fill_labeled(page, FIELD_CANDIDATES["email"], guest.email)
+    await _fill_labeled(page, FIELD_CANDIDATES["phone"], guest.phone)
+
+
 async def _select_hong_kong(page) -> None:
     await _fill_labeled(
         page,
@@ -707,6 +727,18 @@ async def _delivery_days_from_page(page) -> int | None:
     return days_from_quote(text)
 
 
+async def _abort_if_delivery_too_slow(page, match: StockMatch, delivery_max_days: int) -> str | None:
+    days = await _delivery_days_from_page(page)
+    if days is None or days <= delivery_max_days:
+        return None
+    hub.warn("checkout", f"預計送達需 {days} 日，超出設定的 {delivery_max_days} 日內，放棄今次機會")
+    try:
+        await page.goto(product_url(match.sku), wait_until="domcontentloaded", timeout=30_000)
+    except Exception:
+        pass
+    return "delivery_too_slow"
+
+
 async def _handle_fulfillment(
     page,
     match: StockMatch,
@@ -717,18 +749,7 @@ async def _handle_fulfillment(
 ) -> str | None:
     if fulfillment == "delivery":
         await _click_choice(page, DELIVERY_PATTERN, timeout=4000)
-        if checkout_mode == "guest":
-            await _fill_contact(page, guest)
-            await _fill_address(page, guest)
-        days = await _delivery_days_from_page(page)
-        if days is not None and days > delivery_max_days:
-            hub.warn("checkout", f"預計送達需 {days} 日，超出設定的 {delivery_max_days} 日內，放棄今次機會")
-            try:
-                await page.goto(product_url(match.sku), wait_until="domcontentloaded", timeout=30_000)
-            except Exception:
-                pass
-            return "delivery_too_slow"
-        return None
+        return await _abort_if_delivery_too_slow(page, match, delivery_max_days)
 
     await _select_pickup_store(page, match, timeout=4000)
     await _click_earliest_slot(page)
@@ -831,6 +852,7 @@ async def run_checkout(
         step_deadline = asyncio.get_running_loop().time() + 90
         fulfillment_done = False
         contact_done = False
+        shipping_done = False
         billing_done = False
         while asyncio.get_running_loop().time() < step_deadline:
             if await _stopped(stop_event):
@@ -860,6 +882,12 @@ async def run_checkout(
             if checkout_mode == "guest" and stage == "contact" and not contact_done:
                 await _fill_contact(page, guest)
                 contact_done = True
+            if checkout_mode == "guest" and stage == "shipping" and not shipping_done:
+                await _fill_shipping(page, guest)
+                shipping_done = True
+                skipped = await _abort_if_delivery_too_slow(page, match, delivery_max_days)
+                if skipped:
+                    return timer.result(False, skipped)
             if checkout_mode == "guest" and stage == "billing" and not billing_done:
                 await _fill_billing(page, guest)
                 billing_done = True

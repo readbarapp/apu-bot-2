@@ -10,10 +10,12 @@ from bot.checkout import (
     CONTINUE_PATTERN,
     CREDIT_CARD_PATTERN,
     CheckoutResult,
+    DELIVERY_PATTERN,
     GUEST_PATTERN,
     INTERRUPT_MESSAGE,
     NO_APPLECARE_PATTERN,
     NO_TRADEIN_PATTERN,
+    PICKUP_PATTERN,
     REVIEW_ORDER_PATTERN,
     SKIP_PATTERN,
     VIEW_BAG_PATTERN,
@@ -486,6 +488,10 @@ def test_product_option_patterns_match_current_apple_hk_labels() -> None:
     assert CONTINUE_PATTERN.search("繼續前往付款")
     assert CREDIT_CARD_PATTERN.search("信用卡或扣帳卡")
     assert REVIEW_ORDER_PATTERN.search("檢查你的訂單")
+    assert PICKUP_PATTERN.search("我會前來取貨")
+    assert DELIVERY_PATTERN.search("我希望送貨")
+    assert not PICKUP_PATTERN.search("取貨分店")
+    assert not DELIVERY_PATTERN.search("送貨地址")
 
 
 def test_checkout_stage_follows_iphone_guest_pickup_urls() -> None:
@@ -502,6 +508,9 @@ def test_checkout_stage_follows_iphone_guest_pickup_urls() -> None:
     assert checkout_stage(
         "https://secure6.store.apple.com/hk-zh/shop/checkout?_s=PickupContact-init"
     ) == "contact"
+    assert checkout_stage(
+        "https://secure6.store.apple.com/hk-zh/shop/checkout?_s=Shipping-init"
+    ) == "shipping"
     assert checkout_stage(
         "https://secure6.store.apple.com/hk-zh/shop/checkout?_s=Billing-init"
     ) == "billing"
@@ -688,3 +697,6 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "信用卡或扣帳卡" in readme
     assert "檢查你的訂單" in readme
     assert "使用 Apple Pay 結帳" in readme
+    assert "我會前來取貨" in readme
+    assert "我希望送貨" in readme
+    assert "Shipping-init" in readme
