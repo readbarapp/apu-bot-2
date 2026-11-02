@@ -20,8 +20,20 @@
     completed: "已達數量上限",
     stopped: "已停止",
     browser_closed: "瀏覽器已關閉（已停搶）",
+    paused: "已自動暫停",
     error: "發生錯誤",
   };
+  const GUEST_FIELDS = [
+    ["last_name", "英文姓氏"],
+    ["first_name", "英文名字"],
+    ["email", "電郵地址"],
+    ["phone", "香港聯絡電話"],
+    ["address", "送貨地址"],
+    ["card_number", "信用卡號碼"],
+    ["card_month", "有效月份"],
+    ["card_year", "有效年份"],
+    ["cvv", "CVV 安全碼"],
+  ];
   const FALLBACK_CATALOG = {
     stores: [
       { id: "R428", name: "ifc mall", area: "中環" },
@@ -45,6 +57,13 @@
       { id: "1d", label: "一日內" },
       { id: "2d", label: "兩日內" },
       { id: "3d", label: "三日內" },
+    ],
+    delivery_windows: [
+      { id: "3", label: "3 日內送到" },
+      { id: "5", label: "5 日內送到" },
+      { id: "7", label: "7 日內送到" },
+      { id: "10", label: "10 日內送到" },
+      { id: "14", label: "14 日內送到" },
     ],
   };
 
@@ -133,6 +152,20 @@
     return STATUS_LABELS[status] || STATUS_LABELS.idle;
   }
 
+  function emptyGuest() {
+    return {
+      last_name: "",
+      first_name: "",
+      email: "",
+      phone: "",
+      address: "",
+      card_number: "",
+      card_month: "12",
+      card_year: "2028",
+      cvv: "",
+    };
+  }
+
   function defaultWorker(index) {
     const n = index + 1;
     return {
@@ -143,6 +176,10 @@
       stores: ["R428"],
       pickup_window: "1d",
       max_qty: 1,
+      checkout_mode: "apple_id",
+      fulfillment: "pickup",
+      delivery_max_days: 7,
+      guest: emptyGuest(),
       status: "needs_login",
       last_message: "",
       purchased: 0,
@@ -150,6 +187,32 @@
       logged_in: false,
       sniping: false,
     };
+  }
+
+  function isGuestMode(worker) {
+    return (worker.checkout_mode || "apple_id") === "guest";
+  }
+
+  function isDelivery(worker) {
+    return (worker.fulfillment || "pickup") === "delivery";
+  }
+
+  function redactGuest(guest) {
+    const data = { ...emptyGuest(), ...(guest || {}) };
+    const digits = String(data.card_number || "").replace(/\D/g, "");
+    data.card_number = digits.length >= 4 ? `•••• ${digits.slice(-4)}` : "";
+    data.cvv = "";
+    return data;
+  }
+
+  function guestMissing(worker) {
+    const guest = worker.guest || emptyGuest();
+    return GUEST_FIELDS.filter(([key]) => {
+      const value = String(guest[key] || "").trim();
+      if (key === "card_number") return !value;
+      if (key === "cvv") return !value && !String(guest.card_number || "").includes("•");
+      return !value;
+    }).map(([, label]) => label);
   }
 
   function allProducts() {
@@ -182,22 +245,28 @@
     `;
   }
 
-  function serializeWorkers(workers) {
-    return workers.map(({ id, name, session_dir, sku, stores, pickup_window, max_qty }) => ({
-      id, name, session_dir, sku, stores, pickup_window, max_qty,
+  function serializeWorkers(workers, { redact = true } = {}) {
+    return workers.map((worker) => ({
+      id: worker.id,
+      name: worker.name,
+      session_dir: worker.session_dir || (isGuestMode(worker) ? `session_guest_${worker.id}` : ""),
+      sku: worker.sku,
+      stores: isDelivery(worker) ? [] : (worker.stores || []),
+      pickup_window: worker.pickup_window || "1d",
+      max_qty: worker.max_qty,
+      checkout_mode: worker.checkout_mode || "apple_id",
+      fulfillment: worker.fulfillment || "pickup",
+      delivery_max_days: Number(worker.delivery_max_days || 7),
+      guest: redact ? redactGuest(worker.guest) : { ...emptyGuest(), ...(worker.guest || {}) },
     }));
   }
 
   function profileOf(worker) {
-    return {
-      id: worker.id,
-      name: worker.name,
-      session_dir: worker.session_dir,
-      sku: worker.sku,
-      stores: worker.stores,
-      pickup_window: worker.pickup_window,
-      max_qty: worker.max_qty,
-    };
+    return serializeWorkers([worker], { redact: true })[0];
+  }
+
+  function apiProfile(worker) {
+    return serializeWorkers([worker], { redact: false })[0];
   }
 
   function savedProfile(id) {
@@ -290,14 +359,33 @@
         };
       }
       const stores = [...card.querySelectorAll(".store:checked")].map((box) => box.value);
+      const checkoutMode = card.querySelector(".checkout-mode")?.value || prev.checkout_mode || "apple_id";
+      const fulfillment = card.querySelector(".fulfillment")?.value || prev.fulfillment || "pickup";
+      const sessionDir = card.querySelector(".session")?.value.trim()
+        || prev.session_dir
+        || (checkoutMode === "guest" ? `session_guest_${card.dataset.id}` : "");
       return {
         id: card.dataset.id,
         name: card.querySelector(".name").value.trim(),
-        session_dir: card.querySelector(".session").value.trim(),
+        session_dir: sessionDir,
         sku: card.querySelector(".sku").value.trim(),
         stores,
-        pickup_window: card.querySelector(".pickup").value,
+        pickup_window: card.querySelector(".pickup")?.value || prev.pickup_window || "1d",
         max_qty: Number(card.querySelector(".qty").value || 1),
+        checkout_mode: checkoutMode,
+        fulfillment,
+        delivery_max_days: Number(card.querySelector(".delivery-days")?.value || prev.delivery_max_days || 7),
+        guest: {
+          last_name: card.querySelector(".guest-last")?.value.trim() || "",
+          first_name: card.querySelector(".guest-first")?.value.trim() || "",
+          email: card.querySelector(".guest-email")?.value.trim() || "",
+          phone: card.querySelector(".guest-phone")?.value.trim() || "",
+          address: card.querySelector(".guest-address")?.value.trim() || "",
+          card_number: card.querySelector(".guest-card")?.value.trim() || "",
+          card_month: card.querySelector(".guest-month")?.value.trim() || "",
+          card_year: card.querySelector(".guest-year")?.value.trim() || "",
+          cvv: card.querySelector(".guest-cvv")?.value.trim() || "",
+        },
         status: card.dataset.status || prev.status || "needs_login",
         last_message: card.dataset.message || prev.last_message || "",
         purchased: Number(card.dataset.purchased || prev.purchased || 0),
@@ -330,15 +418,26 @@
   }
 
   function unloggedWorkers() {
-    return state.workers.filter((worker) => !(worker.logged_in || worker.apple_id));
+    return state.workers.filter((worker) => !isGuestMode(worker) && !(worker.logged_in || worker.apple_id));
+  }
+
+  function incompleteGuestWorkers() {
+    return state.workers.filter((worker) => isGuestMode(worker) && guestMissing(worker).length);
+  }
+
+  function canRun(worker) {
+    if (worker.sniping || isDirty(worker)) return false;
+    if (isGuestMode(worker)) return guestMissing(worker).length === 0;
+    return Boolean(worker.logged_in || worker.apple_id);
   }
 
   function updateStartGate() {
     if (!els.start) return;
     const unsaved = unsavedWorkers();
     const unlogged = unloggedWorkers();
+    const incompleteGuest = incompleteGuestWorkers();
     const allSniping = state.workers.length > 0 && state.workers.every((worker) => worker.sniping);
-    const blocked = !state.workers.length || unsaved.length > 0 || unlogged.length > 0 || allSniping;
+    const blocked = !state.workers.length || unsaved.length > 0 || unlogged.length > 0 || incompleteGuest.length > 0 || allSniping;
     els.start.disabled = blocked;
     if (!els.startHint) return;
     if (!state.workers.length) {
@@ -353,7 +452,12 @@
     }
     if (unlogged.length) {
       els.startHint.className = "start-hint blocked";
-      els.startHint.textContent = `仲有 ${unlogged.length} 個未登入：${unlogged.map((item) => item.name || "未命名").join("、")}。請登入，或者刪除未登入嘅 Worker。`;
+      els.startHint.textContent = `仲有 ${unlogged.length} 個 Apple ID 模式未登入：${unlogged.map((item) => item.name || "未命名").join("、")}。請登入，或者刪除未登入嘅 Worker。`;
+      return;
+    }
+    if (incompleteGuest.length) {
+      els.startHint.className = "start-hint blocked";
+      els.startHint.textContent = `訪客模式請填妥個人同信用卡資料：${incompleteGuest.map((item) => item.name || "未命名").join("、")}`;
       return;
     }
     if (allSniping) {
@@ -362,7 +466,7 @@
       return;
     }
     els.startHint.className = "start-hint ok";
-    els.startHint.textContent = `已登入 ${state.workers.length} 個 Worker，可以全部開始搶機。單個用「開始運作／暫停運作」。`;
+    els.startHint.textContent = `已備好 ${state.workers.length} 個 Worker，可以全部開始搶機。單個用「開始運作／暫停運作」。`;
   }
 
   function setRunning(running, testMode) {
@@ -387,7 +491,7 @@
       const loginBtn = card.querySelector(".login");
       const focusBtn = card.querySelector(".focus");
       const saved = worker ? !isDirty(worker) : false;
-      if (runBtn) runBtn.disabled = !loggedIn || sniping || !saved;
+      if (runBtn) runBtn.disabled = worker ? !canRun(worker) : (!loggedIn || sniping || !saved);
       if (pauseBtn) pauseBtn.disabled = !sniping;
       if (loginBtn) loginBtn.disabled = sniping;
       if (focusBtn) focusBtn.disabled = false;
@@ -432,6 +536,27 @@
     )).join("");
   }
 
+  function deliveryOptions(selected) {
+    const windows = state.catalog.delivery_windows || FALLBACK_CATALOG.delivery_windows;
+    const current = String(selected || 7);
+    return windows.map((item) => (
+      `<option value="${esc(item.id)}" ${String(item.id) === current || String(item.max_days) === current ? "selected" : ""}>${esc(item.label)}</option>`
+    )).join("");
+  }
+
+  function yearOptions(selected) {
+    const year = new Date().getFullYear();
+    return Array.from({ length: 12 }, (_, index) => String(year + index)).map((value) => (
+      `<option value="${esc(value)}" ${String(selected) === value ? "selected" : ""}>${esc(value)}</option>`
+    )).join("");
+  }
+
+  function monthOptions(selected) {
+    return Array.from({ length: 12 }, (_, index) => String(index + 1).padStart(2, "0")).map((value) => (
+      `<option value="${esc(value)}" ${String(selected).padStart(2, "0") === value ? "selected" : ""}>${esc(value)}</option>`
+    )).join("");
+  }
+
   function workerCardHtml(worker, entering) {
     const status = worker.status || (worker.logged_in ? "ready" : "needs_login");
     const sniping = Boolean(worker.sniping);
@@ -440,13 +565,18 @@
     const collapsed = collapsedSet().has(worker.id);
     const email = worker.apple_id || "";
     const saved = !isDirty(worker);
-    const note = worker.last_message || (loggedIn
-      ? "已登入。可以撳「開始運作」或上面綠色「全部開始搶機」。"
-      : "未登入。請先撳「登入 Apple ID」。");
+    const guest = { ...emptyGuest(), ...(worker.guest || {}) };
+    const checkoutMode = worker.checkout_mode || "apple_id";
+    const fulfillment = worker.fulfillment || "pickup";
+    const note = worker.last_message || (checkoutMode === "guest"
+      ? "訪客模式：填妥個人同信用卡資料後，撳「儲存此 Worker」就可以開始運作。"
+      : (loggedIn
+        ? "已登入。可以撳「開始運作」或上面綠色「全部開始搶機」。"
+        : "未登入。請先撳「登入 Apple ID」。"));
     const sessionHint = `會儲存在專案資料夾 sessions/${worker.session_dir || "session_worker_1"}。Chromium 把 Apple ID cookie 寫入呢度，下次開同一個資料夾就記得登入。`;
-    const meta = `${worker.sku || "未揀 SKU"} · ${loggedIn ? (email || "已登入") : "未登入"}`;
+    const meta = `${worker.sku || "未揀 SKU"} · ${checkoutMode === "guest" ? "訪客" : (loggedIn ? (email || "已登入") : "未登入")} · ${fulfillment === "delivery" ? "送貨" : "自取"}`;
     return `
-      <article class="worker-card${entering ? " enter" : ""}${sniping ? " is-sniping" : ""}${closed ? " is-closed" : ""}${collapsed ? " is-collapsed" : ""}" data-id="${esc(worker.id)}" data-status="${esc(status)}" data-message="${esc(worker.last_message || "")}" data-purchased="${esc(worker.purchased || 0)}" data-sniping="${sniping}" data-logged-in="${loggedIn}">
+      <article class="worker-card${entering ? " enter" : ""}${sniping ? " is-sniping" : ""}${closed ? " is-closed" : ""}${collapsed ? " is-collapsed" : ""}" data-id="${esc(worker.id)}" data-status="${esc(status)}" data-message="${esc(worker.last_message || "")}" data-purchased="${esc(worker.purchased || 0)}" data-sniping="${sniping}" data-logged-in="${loggedIn}" data-checkout="${esc(checkoutMode)}" data-fulfillment="${esc(fulfillment)}">
         <div class="worker-top">
           <button type="button" class="collapse-toggle" aria-expanded="${collapsed ? "false" : "true"}" aria-label="展開或收合 Worker">▾</button>
           <div class="worker-heading">
@@ -455,7 +585,7 @@
           </div>
           <span class="badge ${esc(status)}">${esc(statusLabel(status))}${worker.purchased ? ` · ${worker.purchased}/${worker.max_qty}` : ""}</span>
           <div class="worker-top-actions">
-            <button type="button" class="btn run-one" ${loggedIn && !sniping && saved ? "" : "disabled"}>開始運作</button>
+            <button type="button" class="btn run-one" ${canRun(worker) ? "" : "disabled"}>開始運作</button>
             <button type="button" class="btn pause-one" ${sniping ? "" : "disabled"}>暫停運作</button>
           </div>
         </div>
@@ -472,10 +602,39 @@
             <input class="name" type="text" value="${esc(worker.name)}" />
           </label>
           <label class="field">
+            <span>結帳模式 (Checkout Mode)</span>
+            <select class="checkout-mode">
+              <option value="apple_id" ${checkoutMode === "apple_id" ? "selected" : ""}>Apple ID 登入模式</option>
+              <option value="guest" ${checkoutMode === "guest" ? "selected" : ""}>訪客 (Guest) 模式</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>取貨方式 (Fulfillment)</span>
+            <select class="fulfillment">
+              <option value="pickup" ${fulfillment === "pickup" ? "selected" : ""}>門市自取 (Store Pickup)</option>
+              <option value="delivery" ${fulfillment === "delivery" ? "selected" : ""}>送貨上門 (Home Delivery)</option>
+            </select>
+          </label>
+          <label class="field session-field">
             <span>Apple ID Session 資料夾</span>
             <input class="session" type="text" value="${esc(worker.session_dir)}" placeholder="session_worker_1" />
             <p class="help session-path">${esc(sessionHint)}</p>
           </label>
+          <div class="field full guest-fields">
+            <span>訪客資料（只存在你呢部電腦，唔會上傳 GitHub，亦唔會寫入 Live Log）</span>
+            <div class="grid">
+              <label class="field"><span>英文姓氏</span><input class="guest-last" type="text" autocomplete="off" value="${esc(guest.last_name)}" /></label>
+              <label class="field"><span>英文名字</span><input class="guest-first" type="text" autocomplete="off" value="${esc(guest.first_name)}" /></label>
+              <label class="field"><span>電郵地址</span><input class="guest-email" type="email" autocomplete="off" value="${esc(guest.email)}" /></label>
+              <label class="field"><span>香港聯絡電話</span><input class="guest-phone" type="tel" autocomplete="off" value="${esc(guest.phone)}" /></label>
+              <label class="field full"><span>送貨地址</span><input class="guest-address" type="text" autocomplete="off" value="${esc(guest.address)}" /></label>
+              <label class="field full"><span>信用卡號碼</span><input class="guest-card" type="text" inputmode="numeric" autocomplete="off" value="${esc(guest.card_number)}" /></label>
+              <label class="field"><span>有效月份</span><select class="guest-month">${monthOptions(guest.card_month)}</select></label>
+              <label class="field"><span>有效年份</span><select class="guest-year">${yearOptions(guest.card_year)}</select></label>
+              <label class="field"><span>CVV 安全碼</span><input class="guest-cvv" type="password" maxlength="4" autocomplete="off" value="${esc(guest.cvv)}" /></label>
+            </div>
+            <p class="help">卡號同 CVV 只會加密寫入本機 secrets 資料夾。清瀏覽器後 CVV 要再填一次。</p>
+          </div>
           <div class="field full sku-block">
             <span>1. 目標機型（每個 Worker 只搶一個 SKU）</span>
             <select class="sku" aria-label="目標機型 SKU">${productOptions(worker.sku)}</select>
@@ -488,13 +647,18 @@
             <div class="extra-sku-wrap">${extraSkuListHtml()}</div>
             <p class="help">唔限 iPhone，AirPods / Mac 等只要香港門市取貨適用都得。名稱留空會顯示「自訂 SKU + 編號」。加入後會記住喺呢個瀏覽器嘅下拉選單（清瀏覽器資料就會消失）。打錯自訂 SKU 可以喺上面撳「刪除」；內建 Duo 機型刪唔到。每個 Worker 只搶一個 SKU。</p>
           </div>
-          <div class="field full">
+          <div class="field full pickup-fields">
             <span>香港指定門市（可複選）</span>
             <div class="stores">${storeBoxes(worker.stores || [])}</div>
           </div>
-          <label class="field">
+          <label class="field pickup-fields">
             <span>取貨時間限制</span>
             <select class="pickup">${pickupOptions(worker.pickup_window)}</select>
+          </label>
+          <label class="field full delivery-fields">
+            <span>送貨時效限制（最快必須在幾日內送達）</span>
+            <select class="delivery-days">${deliveryOptions(worker.delivery_max_days)}</select>
+            <p class="help">官網預計送達日如果超出呢個日數，呢次機會會放棄，繼續監察。</p>
           </label>
           <label class="field full">
             <span>購買數量上限（此 Worker 全部門市合計）</span>
@@ -577,7 +741,7 @@
     const runBtn = card.querySelector(".run-one");
     const pauseBtn = card.querySelector(".pause-one");
     const saved = !isDirty(worker);
-    if (runBtn) runBtn.disabled = !loggedIn || sniping || !saved;
+    if (runBtn) runBtn.disabled = !canRun(worker);
     if (pauseBtn) pauseBtn.disabled = !sniping;
     updateCardSaveState(worker);
   }
@@ -626,7 +790,17 @@
     if (!data) return;
     if (Array.isArray(data.workers) && data.workers.length) {
       const byId = new Map(data.workers.map((item) => [item.id, item]));
-      state.workers = state.workers.map((worker) => ({ ...worker, ...(byId.get(worker.id) || {}) }));
+      state.workers = state.workers.map((worker) => {
+        const incoming = byId.get(worker.id) || {};
+        const guest = { ...(worker.guest || {}), ...(incoming.guest || {}) };
+        if (!(incoming.guest && incoming.guest.cvv)) guest.cvv = (worker.guest || {}).cvv || "";
+        const incomingCard = String((incoming.guest || {}).card_number || "");
+        const localCard = String((worker.guest || {}).card_number || "");
+        if (incomingCard.includes("•") && localCard.replace(/\D/g, "").length >= 12) {
+          guest.card_number = localCard;
+        }
+        return { ...worker, ...incoming, guest };
+      });
       data.workers.forEach((item) => {
         if (!state.workers.some((worker) => worker.id === item.id)) {
           state.workers.push(item);
@@ -668,14 +842,30 @@
       window.alert("呢個 Worker 運作中，設定已鎖定。請先「暫停運作」再改同儲存。");
       return false;
     }
-    if (!worker.name || !worker.session_dir || !worker.sku || !worker.stores.length) {
-      window.alert("此 Worker 要有名稱、session 資料夾、目標機型，同至少一間香港門市。");
+    if (!worker.name || !worker.sku) {
+      window.alert("此 Worker 要有名稱同目標機型。");
+      return false;
+    }
+    if (!isGuestMode(worker) && !worker.session_dir) {
+      window.alert("Apple ID 模式必須填寫 Session 資料夾路徑。");
+      return false;
+    }
+    if (isGuestMode(worker)) {
+      const missing = guestMissing(worker);
+      if (missing.length) {
+        window.alert(`訪客模式請填妥：${missing.join("、")}`);
+        return false;
+      }
+      if (!worker.session_dir) worker.session_dir = `session_guest_${worker.id}`;
+    }
+    if (!isDelivery(worker) && !(worker.stores || []).length) {
+      window.alert("門市自取必須至少揀一間香港門市。");
       return false;
     }
     const clash = state.savedWorkers.find((item) => item.id !== worker.id && item.session_dir === worker.session_dir);
     const liveClash = state.workers.find((item) => item.id !== worker.id && item.session_dir === worker.session_dir);
     if (clash || liveClash) {
-      window.alert("每個 Worker 要用唔同嘅 session 資料夾（一個資料夾 = 一個 Apple ID）。");
+      window.alert("每個 Worker 要用唔同嘅 session 資料夾，唔好共用。");
       return false;
     }
     const profile = profileOf(worker);
@@ -686,6 +876,14 @@
     saveJson(STORAGE_SAVED, state.savedWorkers);
     persistDraft();
     updateSaveHint();
+    if (isGuestMode(worker) && !state.previewMode) {
+      api("/api/workers/secrets", {
+        method: "POST",
+        body: JSON.stringify({ test_mode: els.testMode.checked, worker: apiProfile(worker) }),
+      }).catch((err) => {
+        appendLog({ ts: new Date().toISOString(), worker: worker.name, level: "error", message: err.message });
+      });
+    }
     appendLog({
       ts: new Date().toISOString(),
       worker: worker.name,
@@ -705,7 +903,13 @@
     }
     const unlogged = unloggedWorkers();
     if (unlogged.length) {
-      window.alert(`仲有 Worker 未登入 Apple ID：${unlogged.map((item) => item.name).join("、")}。請登入，或者刪除未登入嘅 Worker。`);
+      window.alert(`仲有 Apple ID 模式 Worker 未登入：${unlogged.map((item) => item.name).join("、")}。請登入，或者刪除未登入嘅 Worker。`);
+      updateStartGate();
+      return;
+    }
+    const incompleteGuest = incompleteGuestWorkers();
+    if (incompleteGuest.length) {
+      window.alert(`訪客模式請填妥個人同信用卡資料：${incompleteGuest.map((item) => `${item.name}（${guestMissing(item).join("、")}）`).join("；")}`);
       updateStartGate();
       return;
     }
@@ -732,7 +936,7 @@
         method: "POST",
         body: JSON.stringify({
           test_mode: els.testMode.checked,
-          workers: serializeWorkers(state.workers),
+          workers: serializeWorkers(state.workers, { redact: false }),
         }),
       });
       applyStatus(data);
@@ -759,18 +963,9 @@
     readCardsIntoState();
     const worker = state.workers.find((item) => item.id === id);
     if (!worker) throw new Error("找不到這個 Worker");
-    const { apple_id, logged_in, sniping, status, last_message, purchased, ...profile } = worker;
     return {
       test_mode: els.testMode.checked,
-      worker: {
-        id: profile.id,
-        name: profile.name,
-        session_dir: profile.session_dir,
-        sku: profile.sku,
-        stores: profile.stores,
-        pickup_window: profile.pickup_window,
-        max_qty: profile.max_qty,
-      },
+      worker: apiProfile(worker),
     };
   }
 
@@ -822,7 +1017,13 @@
       window.alert("請先撳「儲存此 Worker」，再開始運作。");
       return;
     }
-    if (!(worker.logged_in || worker.apple_id)) {
+    if (isGuestMode(worker)) {
+      const missing = guestMissing(worker);
+      if (missing.length) {
+        window.alert(`訪客模式請填妥：${missing.join("、")}`);
+        return;
+      }
+    } else if (!(worker.logged_in || worker.apple_id)) {
       window.alert("請先撳「登入 Apple ID」，登入成功後先可以開始運作。");
       return;
     }
@@ -909,7 +1110,14 @@
   els.list.addEventListener("input", () => {
     readCardsIntoState();
   });
-  els.list.addEventListener("change", () => {
+  els.list.addEventListener("change", (event) => {
+    const card = event.target.closest(".worker-card");
+    if (card && event.target.classList.contains("checkout-mode")) {
+      card.dataset.checkout = event.target.value;
+    }
+    if (card && event.target.classList.contains("fulfillment")) {
+      card.dataset.fulfillment = event.target.value;
+    }
     readCardsIntoState();
   });
   els.list.addEventListener("click", (event) => {

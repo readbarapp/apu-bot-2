@@ -14,7 +14,9 @@ from bot.catalogs import (
     shop_home_url,
     signin_url,
 )
-from bot.checkout import run_checkout
+from bot.catalogs import STORE_BY_ID
+from bot.checkout import INTERRUPT_MESSAGE, run_checkout
+from bot.secrets import public_guest
 from bot.inventory import (
     backoff_seconds,
     is_rate_limited,
@@ -94,6 +96,10 @@ class Worker:
             "stores": self.profile.stores,
             "pickup_window": self.profile.pickup_window,
             "max_qty": self.profile.max_qty,
+            "checkout_mode": self.profile.checkout_mode,
+            "fulfillment": self.profile.fulfillment,
+            "delivery_max_days": self.profile.delivery_max_days,
+            "guest": public_guest(self.profile.guest.model_dump()),
             "purchased": self.purchased,
             "status": self.status,
             "last_message": self.last_message,
@@ -225,6 +231,9 @@ class Worker:
         await page.goto(shop_home_url(), wait_until="domcontentloaded", timeout=45_000)
         self.ready_event.set()
         await self.refresh_account()
+        if self.profile.checkout_mode == "guest":
+            self._set("ready", "訪客模式：唔使登入 Apple ID。資料已備好，可以開始運作。")
+            return
         if self.logged_in:
             label = self.apple_id or "已登入"
             self._set("ready", f"已登入 Apple ID：{label}。待命中，撳「全部開始搶機」或「開始運作」。")
@@ -258,6 +267,10 @@ class Worker:
 
     async def open_login(self) -> None:
         await self.ensure_browser()
+        if self.profile.checkout_mode == "guest":
+            await self.bring_to_front()
+            hub.info(self.profile.name, "訪客模式唔使登入 Apple ID。視窗已帶到最前。")
+            return
         page = await self._page()
         email = await self.refresh_account()
         await self.bring_to_front()
@@ -300,27 +313,32 @@ class Worker:
             self._set("needs_login", "仍未偵測到登入。可再撳「登入 Apple ID」。", level="warn")
 
     async def start_sniping(self) -> None:
-        if not self.logged_in and not self.apple_id:
-            if self.context is not None:
-                await self.refresh_account()
+        guest = self.profile.checkout_mode == "guest"
+        if not guest:
+            if not self.logged_in and not self.apple_id:
+                if self.context is not None:
+                    await self.refresh_account()
+                if not self.logged_in and not self.apple_id:
+                    raise RuntimeError("尚未登入 Apple ID，不能開始搶機")
+        await self.ensure_browser()
+        if not guest:
+            await self.refresh_account()
             if not self.logged_in and not self.apple_id:
                 raise RuntimeError("尚未登入 Apple ID，不能開始搶機")
-        await self.ensure_browser()
-        await self.refresh_account()
-        if not self.logged_in and not self.apple_id:
-            raise RuntimeError("尚未登入 Apple ID，不能開始搶機")
         if self.sniping:
             return
         self.snipe_stop = asyncio.Event()
         self.sniping = True
         self._snipe_task = asyncio.create_task(self._snipe_loop(), name=f"snipe-{self.profile.name}")
-        label = self.apple_id or "已登入"
+        label = "訪客" if guest else (self.apple_id or "已登入")
         self._set("watching", f"開始搶購（{label}）")
 
     async def stop_sniping(self) -> None:
         self.snipe_stop.set()
         await self._cancel_snipe()
-        if self.logged_in or self.apple_id:
+        if self.profile.checkout_mode == "guest":
+            self._set("ready", "已暫停搶購。訪客資料仍在，撳「開始運作」即可再搶。")
+        elif self.logged_in or self.apple_id:
             label = self.apple_id or "已登入"
             self._set("ready", f"已暫停搶購。Apple ID {label} 仍然登入，撳「開始運作」即可再搶。")
         else:
@@ -336,12 +354,27 @@ class Worker:
         if status >= 400:
             raise RuntimeError(f"庫存查詢失敗 HTTP {status}")
         payload = await response.json()
+        if self.profile.fulfillment == "delivery":
+            store_ids = list(STORE_BY_ID)
+            pickup_window = "3d"
+        else:
+            store_ids = self.profile.stores
+            pickup_window = self.profile.pickup_window
         return parse_pickup_payload(
             payload,
             sku=self.profile.sku,
-            store_ids=self.profile.stores,
-            pickup_window=self.profile.pickup_window,
+            store_ids=store_ids,
+            pickup_window=pickup_window,
         )
+
+    async def _auto_pause(self) -> None:
+        self.sniping = False
+        self.snipe_stop.set()
+        try:
+            await self.bring_to_front()
+        except Exception:
+            pass
+        self._set("paused", INTERRUPT_MESSAGE, level="error")
 
     async def _snipe_loop(self) -> None:
         try:
@@ -387,14 +420,28 @@ class Worker:
                     f"偵測到貨：{match.store_name} / {match.quote}，開始自動結帳",
                     level="success",
                 )
-                result = await run_checkout(
-                    await self._page(),
-                    sku=self.profile.sku,
-                    match=match,
-                    test_mode=self.test_mode,
-                    worker_name=self.profile.name,
-                    stop_event=self.stop_event,
-                )
+                try:
+                    result = await run_checkout(
+                        await self._page(),
+                        sku=self.profile.sku,
+                        match=match,
+                        test_mode=self.test_mode,
+                        worker_name=self.profile.name,
+                        stop_event=self.stop_event,
+                        checkout_mode=self.profile.checkout_mode,
+                        fulfillment=self.profile.fulfillment,
+                        guest=self.profile.guest if self.profile.checkout_mode == "guest" else None,
+                        delivery_max_days=self.profile.delivery_max_days,
+                    )
+                except Exception as exc:
+                    if is_browser_closed_error(exc):
+                        await self._on_browser_closed()
+                        return
+                    await self._auto_pause()
+                    return
+                if result.pause:
+                    await self._auto_pause()
+                    return
                 if result.ok:
                     # One worker-wide counter for every selected store combined.
                     self.purchased += 1

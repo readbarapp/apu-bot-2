@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections import deque
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
 HK = ZoneInfo("Asia/Hong_Kong")
+
+_PAN = re.compile(r"\b(?:\d[ -]*?){13,19}\b")
+_CVV = re.compile(r"(?i)\b(?:cvv|cvc|安全碼)[:\s\-]*\d{3,4}\b")
+_CARD_KEY = re.compile(r"(?i)(card_number|pan|信用卡號碼)\s*[:=]\s*\S+")
+
+
+def redact_message(message: str) -> str:
+    text = _PAN.sub("[已隱藏卡號]", message)
+    text = _CVV.sub("[已隱藏安全碼]", text)
+    return _CARD_KEY.sub(r"\1=[已隱藏]", text)
 
 
 def _now() -> str:
@@ -34,7 +45,7 @@ class LogHub:
             "ts": _now(),
             "worker": worker or "system",
             "level": level,
-            "message": message,
+            "message": redact_message(message),
         }
         self._history.append(item)
         dead: list[asyncio.Queue[dict[str, Any]]] = []

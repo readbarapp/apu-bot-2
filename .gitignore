@@ -1,5 +1,7 @@
 .venv/
 venv/
+.env
+secrets/
 __pycache__/
 *.py[cod]
 *$py.class

@@ -24,6 +24,7 @@ def test_catalog_lists_hk_stores_and_duo_skus(client) -> None:
     assert "MK2D4ZA/A" in skus
     labels = {item["label"] for item in data["pickup_windows"]}
     assert labels == {"一日內", "兩日內", "三日內"}
+    assert {item["max_days"] for item in data["delivery_windows"]} == {3, 5, 7, 10, 14}
 
 
 def test_index_and_frontend_assets(client) -> None:
@@ -65,8 +66,9 @@ def test_index_and_frontend_assets(client) -> None:
     assert "初次設定流程" in preview
     assert "購買數量上限（此 Worker 全部門市合計）" in js.text
     assert "唔係每間門市各 2 部" in js.text
-    assert "數量上限係此 Worker 全部門市合計" in page.text
-    assert "數量上限係此 Worker 全部門市合計" in preview
+    assert "結帳模式 (Checkout Mode)" in js.text
+    assert "結帳模式" in page.text or "揀結帳模式" in page.text
+    assert "揀結帳模式" in preview
 
 
 def test_requirements_skip_packages_that_need_msvc_on_windows() -> None:
