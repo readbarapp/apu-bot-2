@@ -15,7 +15,9 @@ from bot.checkout import (
     _click_add_to_bag,
     _continue_as_guest,
     _decline_tradein_and_applecare,
+    block_report,
     checkout_is_blocked,
+    wait_if_checkout_blocked,
 )
 from bot.inventory import days_from_quote
 from bot.logs import hub, redact_message
@@ -217,6 +219,40 @@ async def test_continue_as_guest_blocks_if_still_on_signin() -> None:
     assert await _continue_as_guest(page) == "guest_blocked"
 
 
+def test_block_report_is_copyable_without_reading_code() -> None:
+    text = block_report(
+        "加車",
+        "https://www.apple.com/hk-zh/shop/404",
+        "未找到頁面 - Apple (香港)",
+        "加車掣已撳但跳咗 404/541",
+    )
+    assert text.startswith("【請複製呢段到對話】")
+    assert "步驟=加車" in text
+    assert "被擋頁=是" in text
+    assert "shop/404" in text
+    assert block_report("訪客結帳", "https://secure.store.apple.com/hk-zh/shop/checkout") == (
+        "【請複製呢段到對話】；步驟=訪客結帳；"
+        "網址=https://secure.store.apple.com/hk-zh/shop/checkout；"
+        "標題=（無）；被擋頁=否"
+    )
+
+
+class _FakeNavPage:
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+    async def wait_for_url(self, *_args, **_kwargs) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_wait_if_checkout_blocked_detects_404_not_bag() -> None:
+    assert await wait_if_checkout_blocked(_FakeNavPage("https://www.apple.com/hk-zh/shop/404"))
+    assert not await wait_if_checkout_blocked(
+        _FakeNavPage("https://www.apple.com/hk-zh/shop/bag")
+    )
+
+
 def test_product_option_patterns_match_current_apple_hk_labels() -> None:
     assert NO_TRADEIN_PATTERN.search("不換購")
     assert NO_APPLECARE_PATTERN.search("無 AppleCare+ 服務計劃保障")
@@ -346,3 +382,5 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "signInx" in readme
     assert "本機 Google Chrome" in readme
     assert "屋企 IP 都被當 bot" in readme
+    assert "【請複製呢段到對話】" in readme
+    assert "平時用嘅 Chrome" in readme
