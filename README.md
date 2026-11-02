@@ -234,6 +234,13 @@ http://127.0.0.1:8765
 
 Bot 而家會撳 `data-autom="guest-checkout-btn"`（「以訪客身份繼續」），等真實結帳頁。若然仍然 404，多數係網絡被擋（例如機房 IP），唔係掣撳錯。請喺**香港家用網絡**開測試模式再試；測試模式仍然停在付款前最後一步，唔會落單。
 
+聽朝喺屋企點分成功定 541：
+
+- **成功：** 購物袋有貨 → 去到「登入以快速完成結帳」→ 撳訪客之後入到揀送貨／取貨、填姓名地址卡。Live Log 會出效能實測報告，測試模式停在付款前。
+- **仍然 541：** 撳加車或「以訪客身份繼續」之後頁面變「找不到你想去的網頁」，Live Log 會寫官網拒絕訪客結帳。呢個係 Apple 風控，唔係掣認錯。
+
+Chromium 會用你本機嘅有頭視窗、香港時區，並收埋 Playwright 預設嘅 `webdriver`／`--enable-automation` 標記，減少屋企機被誤判。
+
 ### `pip install` 話要 Microsoft Visual C++ / Failed building wheel for pyyaml？
 
 **唔使裝 Visual C++ Build Tools。** 呢個 Bot 唔使編譯 PyYAML。
