@@ -27,6 +27,7 @@ from bot.checkout import (
     _click_add_to_bag,
     _continue_as_guest,
     _apply_pickup_location,
+    _click_earliest_slot,
     _guest_nav_done,
     _still_on_signin,
     guest_block_extra,
@@ -661,6 +662,10 @@ def test_product_option_patterns_match_current_apple_hk_labels() -> None:
     assert CHECKOUT_PATTERN.search("結帳")
     assert not CHECKOUT_PATTERN.search("使用 Apple Pay 結帳")
     assert CONTINUE_PATTERN.search("繼續前往付款")
+    assert CONTINUE_PATTERN.search("繼續前往取貨詳情")
+    assert CONTINUE_PATTERN.search("繼續前往送貨詳情")
+    assert not CONTINUE_PATTERN.search("我希望送貨")
+    assert not CONTINUE_PATTERN.search("我會前來取貨")
     assert CREDIT_CARD_PATTERN.search("信用卡或扣帳卡")
     assert REVIEW_ORDER_PATTERN.search("檢查你的訂單")
     assert PICKUP_PATTERN.search("我會前來取貨")
@@ -795,6 +800,71 @@ async def test_apply_pickup_location_reports_missing_district_field() -> None:
     page = _FakePickupPage(mode="missing")
     assert await _apply_pickup_location(page, timeout=400) is False
     assert page.filled == []
+
+
+class _FakeSlotPage:
+    def __init__(self, *, has_slot: bool = False) -> None:
+        self.clicks: list[str] = []
+        self.has_slot = has_slot
+
+    def locator(self, selector: str):
+        is_slot = bool(re.search(r"timeslot|time-slot|timeSlot", selector, re.I))
+        if is_slot:
+            if self.has_slot:
+                return _FakeSlotControl(self, "slot", "上午 10:00", visible=True)
+            return _FakeSlotControl(self, "missing", "", visible=False)
+        return _FakeSlotControl(self, "delivery", "我希望送貨", visible=True)
+
+    def get_by_role(self, role: str, name=None, **_kwargs):
+        if name is None:
+            return _FakeSlotControl(self, "delivery", "我希望送貨", visible=True)
+        matched = hasattr(name, "search") and bool(name.search("上午 10:00"))
+        if self.has_slot and role in {"radio", "button"} and matched:
+            return _FakeSlotControl(self, "slot", "上午 10:00", visible=True)
+        return _FakeSlotControl(self, "missing", "", visible=False)
+
+    def get_by_label(self, pattern, **_kwargs):
+        if self.has_slot and hasattr(pattern, "search") and pattern.search("上午 10:00"):
+            return _FakeSlotControl(self, "slot", "上午 10:00", visible=True)
+        return _FakeSlotControl(self, "missing", "", visible=False)
+
+
+class _FakeSlotControl:
+    def __init__(self, page: _FakeSlotPage, kind: str, label: str, visible: bool) -> None:
+        self._page = page
+        self._kind = kind
+        self._label = label
+        self._visible = visible
+        self.first = self
+
+    async def wait_for(self, **_kwargs) -> None:
+        if not self._visible:
+            raise TimeoutError(self._kind)
+
+    async def click(self, **_kwargs) -> None:
+        if not self._visible:
+            raise TimeoutError(self._kind)
+        self._page.clicks.append(self._kind)
+
+    async def inner_text(self) -> str:
+        return self._label
+
+    async def get_attribute(self, _name: str) -> str:
+        return self._label
+
+
+@pytest.mark.asyncio
+async def test_click_earliest_slot_does_not_click_delivery_radio() -> None:
+    page = _FakeSlotPage(has_slot=False)
+    assert await _click_earliest_slot(page) is False
+    assert page.clicks == []
+
+
+@pytest.mark.asyncio
+async def test_click_earliest_slot_clicks_timeslot_not_delivery() -> None:
+    page = _FakeSlotPage(has_slot=True)
+    assert await _click_earliest_slot(page) is True
+    assert page.clicks == ["slot"]
 
 
 class _FakeResponse:
@@ -1030,6 +1100,7 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "MM/YY" in readme
     assert "查看購物袋" in readme
     assert "繼續前往付款" in readme
+    assert "繼續前往取貨詳情" in readme
     assert "信用卡或扣帳卡" in readme
     assert "檢查你的訂單" in readme
     assert "使用 Apple Pay 結帳" in readme
