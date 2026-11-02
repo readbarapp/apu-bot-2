@@ -231,6 +231,7 @@ class CheckoutResult:
             "add_bag": "Step 1 加車",
             "enter_checkout": "Step 2 進入結帳",
             "fulfillment": "Step 3 處理取貨/送貨",
+            "billing": "到達信用卡頁",
             "payment": "Step 4 到達付款前最後一步",
         }
         parts = [
@@ -267,6 +268,24 @@ class StepTimer:
             total_seconds=round(time.perf_counter() - self.started, 3),
             quantity=max(1, int(quantity or 1)),
         )
+
+    def announce(
+        self,
+        worker_name: str,
+        ok: bool,
+        reason: str,
+        pause: bool = False,
+        quantity: int = 1,
+        *,
+        level: str = "info",
+    ) -> CheckoutResult:
+        """Always emit the second-count report, even if the card form cannot continue."""
+        result = self.result(ok, reason, pause=pause, quantity=quantity)
+        if result.timings or result.total_seconds >= 0.05:
+            emit = getattr(hub, level if level in {"info", "warn", "error", "success"} else "info")
+            emit(worker_name, result.report())
+            print(result.report(), flush=True)
+        return result
 
 
 async def _stopped(stop_event: asyncio.Event) -> bool:
@@ -1287,7 +1306,7 @@ async def run_checkout(
 ) -> CheckoutResult:
     timer = StepTimer()
     if await _stopped(stop_event):
-        return timer.result(False, "stopped")
+        return timer.announce(worker_name, False, "stopped")
 
     try:
         where = match.store_name if fulfillment == "pickup" else f"送貨 {delivery_max_days} 日內"
@@ -1295,7 +1314,7 @@ async def run_checkout(
         await page.goto(product_url(sku), wait_until="domcontentloaded", timeout=45_000)
         await _wait_for_configured_pdp(page)
         if await _stopped(stop_event):
-            return timer.result(False, "stopped")
+            return timer.announce(worker_name, False, "stopped")
 
         hub.info(worker_name, f"產品頁已開（{page.url}），先揀不換購同無 AppleCare+，再開加車")
         await _decline_tradein_and_applecare(page)
@@ -1304,7 +1323,7 @@ async def run_checkout(
         added = False
         while asyncio.get_running_loop().time() < deadline:
             if await _stopped(stop_event):
-                return timer.result(False, "stopped")
+                return timer.announce(worker_name, False, "stopped")
             outcome = await _complete_add_to_bag(page, timeout=4000)
             if outcome == "blocked":
                 hub.error(
@@ -1316,7 +1335,7 @@ async def run_checkout(
                         "加車掣已撳但跳咗 404/541，未入到購物袋。唔好連撳。可改用平時 Chrome 人手試同一款。",
                     ),
                 )
-                return timer.result(False, "add_to_bag_blocked", pause=True)
+                return timer.announce(worker_name, False, "add_to_bag_blocked", pause=True)
             if outcome == "ok":
                 added = True
                 break
@@ -1327,7 +1346,7 @@ async def run_checkout(
             await asyncio.sleep(0.3)
 
         if not added:
-            return timer.result(False, "add_to_bag_failed")
+            return timer.announce(worker_name, False, "add_to_bag_failed")
         timer.mark("add_bag")
 
         hub.info(worker_name, "已加入購物袋，查看購物袋")
@@ -1357,7 +1376,7 @@ async def run_checkout(
                     "撳結帳之後跳咗 404/541。",
                 ),
             )
-            return timer.result(False, "checkout_blocked", pause=True)
+            return timer.announce(worker_name, False, "checkout_blocked", pause=True)
         timer.mark("enter_checkout")
 
         guest_clicked = False
@@ -1375,7 +1394,7 @@ async def run_checkout(
                         guest_block_extra(blocked),
                     ),
                 )
-                return timer.result(False, blocked, pause=True)
+                return timer.announce(worker_name, False, blocked, pause=True)
 
         step_deadline = asyncio.get_running_loop().time() + 90
         fulfillment_done = False
@@ -1384,13 +1403,13 @@ async def run_checkout(
         billing_done = False
         while asyncio.get_running_loop().time() < step_deadline:
             if await _stopped(stop_event):
-                return timer.result(False, "stopped")
+                return timer.announce(worker_name, False, "stopped")
             if checkout_is_blocked(page.url):
                 hub.error(
                     worker_name,
                     block_report("結帳途中", page.url, await page_title(page)),
                 )
-                return timer.result(False, "guest_blocked", pause=True)
+                return timer.announce(worker_name, False, "guest_blocked", pause=True)
             if await _on_place_order_step(page):
                 break
             stage = checkout_stage(page.url)
@@ -1412,7 +1431,7 @@ async def run_checkout(
                             guest_block_extra(blocked),
                         ),
                     )
-                    return timer.result(False, blocked, pause=True)
+                    return timer.announce(worker_name, False, blocked, pause=True)
                 continue
             if not fulfillment_done and stage in ("fulfillment", "other"):
                 skipped = await _handle_fulfillment(
@@ -1431,7 +1450,7 @@ async def run_checkout(
                 fulfillment_done = True
                 timer.mark("fulfillment")
                 if skipped:
-                    return timer.result(False, skipped)
+                    return timer.announce(worker_name, False, skipped)
             if checkout_mode == "guest" and stage == "contact" and not contact_done:
                 await _fill_contact(page, guest)
                 contact_done = True
@@ -1440,13 +1459,19 @@ async def run_checkout(
                 shipping_done = True
                 skipped = await _abort_if_delivery_too_slow(page, match, delivery_max_days)
                 if skipped:
-                    return timer.result(False, skipped)
+                    return timer.announce(worker_name, False, skipped)
             if checkout_mode == "guest" and stage == "billing" and not billing_done:
                 await _fill_billing(page, guest)
                 billing_done = True
+                timer.mark("billing")
+                if test_mode:
+                    # Test cards often cannot pass Apple's check; the card form is the last measurable step.
+                    break
             if await _on_place_order_step(page):
                 break
             if stage == "billing":
+                if test_mode and billing_done:
+                    break
                 await _maybe_click(page, REVIEW_ORDER_PATTERN, timeout=CHECKOUT_STEP_TIMEOUT_MS)
             else:
                 await _maybe_click(page, CONTINUE_PATTERN, timeout=CHECKOUT_STEP_TIMEOUT_MS)
@@ -1462,18 +1487,27 @@ async def run_checkout(
                     guest_block_extra("guest_nav_timeout"),
                 ),
             )
-            return timer.result(False, "guest_nav_timeout", pause=True)
+            return timer.announce(worker_name, False, "guest_nav_timeout", pause=True)
 
-        if not await _on_place_order_step(page):
+        reached_end = await _on_place_order_step(page)
+        reached_card = billing_done or checkout_stage(page.url) == "billing"
+        if test_mode and (reached_end or reached_card):
+            if reached_end:
+                timer.mark("payment")
+            elif "billing" not in timer.marks:
+                timer.mark("billing")
+            stop_at = "付款前最後一步" if reached_end else "信用卡／付款頁（測試卡可能無法繼續，唔影響計時）"
+            hub.success(
+                worker_name,
+                f"測試模式：已停在{stop_at}，不會送出訂單。目前頁面：{page.url}",
+            )
+            return timer.announce(
+                worker_name, True, "dry_run", quantity=bag_qty, level="success"
+            )
+
+        if not reached_end:
             raise CheckoutInterrupted("找不到付款前最後一步，可能被新頁面或手動操作打斷")
         timer.mark("payment")
-
-        if test_mode:
-            result = timer.result(True, "dry_run", quantity=bag_qty)
-            hub.success(worker_name, f"測試模式：已停在最後確認步驟，不會送出訂單。目前頁面：{page.url}")
-            hub.success(worker_name, result.report())
-            print(result.report(), flush=True)
-            return result
 
         hub.warn(worker_name, "真實下單模式：正在送出訂單")
         if not await _click_role(page, PLACE_ORDER_PATTERN, CHECKOUT_STEP_TIMEOUT_MS):
@@ -1482,21 +1516,17 @@ async def run_checkout(
             await page.wait_for_url(re.compile(r"checkout/(thankyou|status|complete)|order", re.I), timeout=20_000)
         except Exception:
             pass
-        result = timer.result(True, "ordered", quantity=bag_qty)
         hub.success(worker_name, f"已送出訂單（或等待確認頁）。目前頁面：{page.url}")
-        hub.success(worker_name, result.report())
-        return result
+        return timer.announce(worker_name, True, "ordered", quantity=bag_qty, level="success")
     except asyncio.CancelledError:
         raise
     except CheckoutInterrupted as exc:
-        result = timer.result(False, "interrupted", pause=True)
         hub.error(worker_name, INTERRUPT_MESSAGE)
         if exc.detail and exc.detail != INTERRUPT_MESSAGE:
             hub.error(worker_name, "請喺已帶到最前嘅視窗手動處理，完成後撳「開始運作」再繼續。")
-        return result
+        return timer.announce(worker_name, False, "interrupted", pause=True, level="warn")
     except Exception as exc:
         if _looks_unexpected(exc):
-            result = timer.result(False, "interrupted", pause=True)
             hub.error(worker_name, INTERRUPT_MESSAGE)
-            return result
-        return timer.result(False, "checkout_error")
+            return timer.announce(worker_name, False, "interrupted", pause=True, level="warn")
+        return timer.announce(worker_name, False, "checkout_error")

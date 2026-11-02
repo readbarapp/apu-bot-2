@@ -4,6 +4,7 @@ import asyncio
 import random
 import re
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,7 @@ from bot.window import (
 
 ROOT = Path(__file__).resolve().parent.parent
 SESSIONS_ROOT = ROOT / "sessions"
+WATCH_HEARTBEAT_POLLS = 8
 
 
 def should_open_account_page(checkout_mode: str, *, sniping: bool) -> bool:
@@ -354,7 +356,10 @@ class Worker:
         self.sniping = True
         self._snipe_task = asyncio.create_task(self._snipe_loop(), name=f"snipe-{self.profile.name}")
         label = "訪客" if guest else (self.apple_id or "已登入")
-        self._set("watching", f"開始搶購（{label}）")
+        self._set(
+            "watching",
+            f"開始搶購（{label}）。而家喺產品頁用 fetch 查庫存，唔會整頁 refresh；有貨先加車。",
+        )
 
     async def stop_sniping(self) -> None:
         self.snipe_stop.set()
@@ -418,6 +423,8 @@ class Worker:
     async def _snipe_loop(self) -> None:
         try:
             blocks = 0
+            polls = 0
+            watch_started = time.monotonic()
             while (
                 not self.stop_event.is_set()
                 and not self.snipe_stop.is_set()
@@ -429,6 +436,7 @@ class Worker:
                 try:
                     matches = await self._check_inventory()
                     blocks = 0
+                    polls += 1
                 except InventoryLimited as exc:
                     blocks += 1
                     if blocks >= INVENTORY_BLOCK_PAUSE_AFTER:
@@ -469,8 +477,15 @@ class Worker:
                     continue
 
                 if not matches:
-                    if self.status != "watching":
-                        self._set("watching", "輪詢中：尚未找到符合條件的貨源")
+                    if polls == 1 or polls % WATCH_HEARTBEAT_POLLS == 0:
+                        elapsed = max(1, int(time.monotonic() - watch_started))
+                        self._set(
+                            "watching",
+                            (
+                                f"正在查貨：第 {polls} 次仍暫無供應（官網 JSON 200）。"
+                                f"已運作 {elapsed}s。停留產品頁用 fetch 問庫存，唔會整頁 refresh。"
+                            ),
+                        )
                     await asyncio.sleep(next_poll_delay(POLL_SECONDS, POLL_JITTER_SECONDS, self._rng))
                     continue
 
@@ -502,15 +517,27 @@ class Worker:
                     await self._auto_pause()
                     return
                 if result.pause:
-                    await self._auto_pause()
+                    message = INTERRUPT_MESSAGE
+                    if result.total_seconds or result.timings:
+                        message = f"{INTERRUPT_MESSAGE} {result.report()}"
+                    self.sniping = False
+                    self.snipe_stop.set()
+                    try:
+                        await self.bring_to_front()
+                    except Exception:
+                        pass
+                    self._set("paused", message, level="error")
                     return
                 if result.ok:
                     # One worker-wide counter for every selected store combined.
                     self.purchased += max(1, result.quantity)
                     if result.reason == "dry_run":
+                        done = f"測試模式完成 {self.purchased}/{self.profile.max_qty}，已停在最後一步。"
+                        if result.total_seconds or result.timings:
+                            done = f"{done} {result.report()}"
                         self._set(
                             "dry_run_paused" if self.purchased >= self.profile.max_qty else "watching",
-                            f"測試模式完成 {self.purchased}/{self.profile.max_qty}，已停在最後一步",
+                            done,
                             level="success",
                         )
                     else:
@@ -522,10 +549,16 @@ class Worker:
                     if self.purchased >= self.profile.max_qty:
                         self.sniping = False
                         self.status = "completed" if result.reason != "dry_run" else "dry_run_paused"
-                        self._set(self.status, "已達購買數量上限，此 Worker 停止搶購", level="success")
+                        cap = "已達購買數量上限，此 Worker 停止搶購"
+                        if result.total_seconds or result.timings:
+                            cap = f"{cap}。{result.report()}"
+                        self._set(self.status, cap, level="success")
                         return
                 else:
-                    self._set("watching", f"結帳未完成（{result.reason}），繼續監控", level="warn")
+                    leftover = f"結帳未完成（{result.reason}），繼續監控"
+                    if result.total_seconds or result.timings:
+                        leftover = f"{leftover}。{result.report()}"
+                    self._set("watching", leftover, level="warn")
                 await asyncio.sleep(next_poll_delay(1.2, (0.2, 0.6), self._rng))
         except asyncio.CancelledError:
             self.sniping = False
