@@ -2,29 +2,29 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
 import shutil
 from pathlib import Path
 from typing import Any
 
 from bot.account import detect_apple_id, has_apple_session, looks_like_signin
 from bot.catalogs import (
-    INVENTORY_TIMEOUT_MS,
     POLL_JITTER_SECONDS,
     POLL_SECONDS,
     account_url,
+    product_url,
     shop_home_url,
     signin_url,
 )
 from bot.catalogs import STORE_BY_ID
-from bot.checkout import INTERRUPT_MESSAGE, run_checkout
+from bot.checkout import INTERRUPT_MESSAGE, checkout_is_blocked, run_checkout
 from bot.secrets import public_guest
 from bot.inventory import (
     INVENTORY_BLOCK_PAUSE_AFTER,
+    InventoryLimited,
     backoff_seconds,
-    is_rate_limited,
+    load_pickup_matches,
     next_poll_delay,
-    parse_pickup_payload,
-    pickup_url,
 )
 from bot.logs import hub
 from bot.models import WorkerProfile
@@ -349,6 +349,7 @@ class Worker:
                 raise RuntimeError("尚未登入 Apple ID，不能開始搶機")
         if self.sniping:
             return
+        await self._open_product_watch_page()
         self.snipe_stop = asyncio.Event()
         self.sniping = True
         self._snipe_task = asyncio.create_task(self._snipe_loop(), name=f"snipe-{self.profile.name}")
@@ -366,24 +367,40 @@ class Worker:
         else:
             self._set("needs_login", "已暫停搶購，尚未登入 Apple ID。")
 
+    async def _open_product_watch_page(self) -> None:
+        """Stay on the Duo/iPhone PDP so inventory fetch looks like the storefront XHR."""
+        page = await self._page()
+        current = getattr(page, "url", "") or ""
+        on_pdp = bool(re.search(r"/shop/(buy-|goto/product|product/)", current, re.I))
+        blocked = checkout_is_blocked(current) or bool(re.search(r"/shop/account", current, re.I))
+        if on_pdp and not blocked:
+            return
+        await page.goto(product_url(self.profile.sku), wait_until="domcontentloaded", timeout=45_000)
+        try:
+            await page.wait_for_url(
+                re.compile(r"/shop/(buy-[^/]+/[^/]+/.+|product/)", re.I),
+                timeout=12_000,
+            )
+        except Exception:
+            pass
+        try:
+            await page.wait_for_load_state("load", timeout=8_000)
+        except Exception:
+            pass
+        if checkout_is_blocked(getattr(page, "url", "") or ""):
+            raise InventoryLimited(541)
+
     async def _check_inventory(self) -> list:
-        assert self.context is not None
-        url = pickup_url(self.profile.sku)
-        response = await self.context.request.get(url, timeout=INVENTORY_TIMEOUT_MS)
-        status = response.status
-        if is_rate_limited(status):
-            raise RateLimited(status)
-        if status >= 400:
-            raise RuntimeError(f"庫存查詢失敗 HTTP {status}")
-        payload = await response.json()
+        await self._open_product_watch_page()
+        page = await self._page()
         if self.profile.fulfillment == "delivery":
             store_ids = list(STORE_BY_ID)
             pickup_window = "3d"
         else:
             store_ids = self.profile.stores
             pickup_window = self.profile.pickup_window
-        return parse_pickup_payload(
-            payload,
+        return await load_pickup_matches(
+            page,
             sku=self.profile.sku,
             store_ids=store_ids,
             pickup_window=pickup_window,
@@ -412,7 +429,7 @@ class Worker:
                 try:
                     matches = await self._check_inventory()
                     blocks = 0
-                except RateLimited as exc:
+                except InventoryLimited as exc:
                     blocks += 1
                     if blocks >= INVENTORY_BLOCK_PAUSE_AFTER:
                         self.sniping = False
@@ -528,7 +545,5 @@ class Worker:
                 await self._snipe_task
 
 
-class RateLimited(Exception):
-    def __init__(self, status: int) -> None:
-        super().__init__(status)
-        self.status = status
+class RateLimited(InventoryLimited):
+    """Backward-compatible alias."""

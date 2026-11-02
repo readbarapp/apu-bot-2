@@ -79,6 +79,115 @@ def pickup_url(sku: str, location: str = PICKUP_LOCATION) -> str:
     return f"{APPLE_ORIGIN}/{APPLE_LOCALE}/shop/retail/pickup-message?{query}"
 
 
+def fulfillment_url(sku: str, location: str = PICKUP_LOCATION) -> str:
+    """Same endpoint the product page JS calls; pickup-message is the older locator API."""
+    query = urlencode(
+        {
+            "fae": "true",
+            "little": "false",
+            "pl": "true",
+            "mts.0": "regular",
+            "mts.1": "compact",
+            "parts.0": sku,
+            "location": location,
+            "searchNearby": "true",
+        }
+    )
+    return f"{APPLE_ORIGIN}/{APPLE_LOCALE}/shop/fulfillment-messages?{query}"
+
+
+def inventory_urls(sku: str, location: str = PICKUP_LOCATION) -> list[str]:
+    return [fulfillment_url(sku, location), pickup_url(sku, location)]
+
+
+INVENTORY_FETCH_SCRIPT = """
+async (url) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/json, text/javascript, */*; q=0.01',
+        'X-Requested-With': 'Fetch',
+      },
+    });
+    const text = await response.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch (e) {}
+    return { status: response.status, url: response.url, data };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+"""
+
+WAF_URL_MARKERS = ("/shop/541", "/shop/404", "/shop/go/404", "/shop/sorry")
+
+
+class InventoryLimited(Exception):
+    def __init__(self, status: int) -> None:
+        super().__init__(f"HTTP {status}")
+        self.status = status
+
+
+async def fetch_json_in_page(page, url: str) -> tuple[int, Any, str]:
+    """Run fetch() inside Chrome so TLS/headers match the storefront, not Playwright's HTTP client."""
+    result = await page.evaluate(INVENTORY_FETCH_SCRIPT, url)
+    if not isinstance(result, dict):
+        return 0, None, ""
+    return int(result.get("status") or 0), result.get("data"), str(result.get("url") or "")
+
+
+def looks_like_inventory_waf(status: int, data: Any, final_url: str = "") -> bool:
+    """541 often follows to /shop/404 HTML; empty JSON is still a real OOS reply."""
+    if is_rate_limited(status):
+        return True
+    lowered = (final_url or "").lower()
+    if any(marker in lowered for marker in WAF_URL_MARKERS):
+        return True
+    return status == 200 and not isinstance(data, dict)
+
+
+async def load_pickup_matches(
+    page,
+    sku: str,
+    store_ids: list[str],
+    pickup_window: str,
+) -> list[StockMatch]:
+    last_limited = 0
+    last_error: Exception | None = None
+    for url in inventory_urls(sku):
+        try:
+            status, data, final_url = await fetch_json_in_page(page, url)
+        except Exception as exc:
+            last_error = exc
+            continue
+        if looks_like_inventory_waf(status, data, final_url):
+            last_limited = status if is_rate_limited(status) else (status or 541)
+            continue
+        if status >= 400:
+            last_error = RuntimeError(f"庫存查詢失敗 HTTP {status}")
+            continue
+        if not isinstance(data, dict):
+            last_error = RuntimeError("庫存查詢冇 JSON（可能係擋頁）")
+            continue
+        return parse_pickup_payload(
+            data,
+            sku=sku,
+            store_ids=store_ids,
+            pickup_window=pickup_window,
+        )
+    if last_limited:
+        raise InventoryLimited(last_limited)
+    if last_error:
+        raise last_error
+    raise RuntimeError("庫存查詢失敗")
+
+
 def _today(now: datetime | None = None) -> date:
     current = now or datetime.now(HK)
     return current.astimezone(HK).date()
@@ -258,7 +367,8 @@ INVENTORY_BLOCK_PAUSE_AFTER = 4
 
 
 def is_rate_limited(status: int) -> bool:
-    return status in {429, 503, 541}
+    # In-page fetch follows 541 → /shop/404, so 404 here is WAF, not "SKU missing".
+    return status in {404, 429, 503, 541}
 
 
 def backoff_seconds(consecutive_blocks: int) -> float:
