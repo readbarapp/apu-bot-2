@@ -228,6 +228,12 @@ http://127.0.0.1:8765
 
 ## 常見問題
 
+### 撳「以訪客身份繼續」之後跳去 404？
+
+呢粒掣**冇獨立網址**。真正動作係 POST 去 Apple ` /shop/signInx `。如果官網回 **HTTP 541**（風控），頁面就會跟住跳 ` /shop/541 ` → ` /shop/go/404 ` → 你見到嘅 404。
+
+Bot 而家會撳 `data-autom="guest-checkout-btn"`（「以訪客身份繼續」），等真實結帳頁。若然仍然 404，多數係網絡被擋（例如機房 IP），唔係掣撳錯。請喺**香港家用網絡**開測試模式再試；測試模式仍然停在付款前最後一步，唔會落單。
+
 ### `pip install` 話要 Microsoft Visual C++ / Failed building wheel for pyyaml？
 
 **唔使裝 Visual C++ Build Tools。** 呢個 Bot 唔使編譯 PyYAML。
