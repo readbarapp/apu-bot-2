@@ -248,7 +248,7 @@ pip install -r requirements.txt
 
 以下用日常說話說明。發現有貨之後，機械人會打開產品頁，**先撳「不換購」同「無 AppleCare+ 服務計劃保障」**（唔揀呢兩步，加入購物袋會一直灰色），然後先至加車。
 
-秒數假設**冇 HTTP 541／404**。前半截用 MagSafe 配件喺官網實測過：打開產品頁 0.4–1.0 秒、加入購物袋 0.9–1.4 秒、撳結帳去到「登入—安全結帳」約 1.6 秒，**加車到登入牆大約 3.2–3.9 秒**。iPhone 要多撳不換購／無 AppleCare+（大約 0.2–2 秒）。後半截（揀門市、填訪客、去到付款前）雲端被擋，未完整行完；下面係按 MagSafe 前半截推算。屋企網絡慢會再長。Duo 冇貨時請用下面 FAQ 嘅有貨 iPhone 先試。
+秒數假設**冇 HTTP 541／404**。前半截用 MagSafe 配件喺官網實測過：打開產品頁 0.4–1.0 秒、加入購物袋 0.9–1.4 秒、撳結帳去到「登入—安全結帳」約 1.6 秒，**加車到登入牆大約 3.2–3.9 秒**。iPhone 要多撳不換購／無 AppleCare+（大約 0.2–2 秒）。後半截（揀門市、填訪客、去到付款前）雲端被擋，未完整行完；下面係按 MagSafe 前半截推算。屋企網絡慢會再長。搶 Duo 2TB 就維持揀嗰粒 SKU 輪詢；只有想試加車／結帳先用下面 FAQ 嘅有貨 iPhone。
 
 ### 你做嘅事（四種組合都一樣開頭）
 
@@ -346,11 +346,11 @@ Bot 會等畫面出現藍色 **「以訪客身份繼續」** 掣先撳（唔單�
 
 訪客結帳**唔需要** Apple 帳戶頁。舊版會喺開瀏覽器之後去 `https://www.apple.com/hk-zh/shop/account` 探測登入，Apple 風控就會跳 404。而家訪客模式只開商店首頁，**唔會再開 /shop/account**。
 
-### 庫存接口被限制（HTTP 541），係咪 IP 被封？
+### 庫存接口被限制（HTTP 541），係咪 IP 被封？搶 Duo 2TB 會唔會因為冇貨而 541？
 
-**唔一定永久封 IP。** 541 係 Apple 風控暫時拒絕呢條庫存查詢（同加車／訪客 541 同一類）。Live Log 會退避 12s → 24s → 48s，連續 4 次就自動暫停，避免越打越擋。
+**541 唔係因為 Duo 冇貨。** 冇貨嘅正確回應係 HTTP 200 JSON（暫無供應），Bot 會繼續輪詢等有貨。541 係 Apple 風控擋咗呢次查詢。舊版用 Playwright 自己嘅 HTTP client 打 `pickup-message`，TLS／標頭同 Chrome 唔同，**家用網絡都會 541**，同 SKU 有冇貨無關。而家改成開 Duo 產品頁，用視窗入面嘅瀏覽器 `fetch` 打 `fulfillment-messages`（同官網自己查庫存同一條通道）。
 
-暫停之後：等幾分鐘，確認只開 **1 個 Worker**、本機 Chrome、香港家用寬頻、冇 VPN。熱點得、寬頻唔得，先至比較似寬頻 IP 被標記。Duo 2TB 如果官網「暫無供應」，就算接口冇 541 都會一直輪詢，唔會加車。
+Live Log 會退避 12s → 24s → 48s，連續 4 次先自動暫停，避免越打越擋。**唔一定永久封 IP。** 暫停之後等幾分鐘，只開 1 個 Worker、本機 Chrome、香港家用寬頻、冇 VPN，再開始搶 Duo 2TB。**唔使換有貨嘅機先可以輪詢。**
 
 ### 屋企 IP 都被當 bot／仍然 541，我可以點做？
 
@@ -367,9 +367,9 @@ Playwright 就算喺家用網絡，都可能帶自動化痕跡。按呢個次序
 
 ### Duo 冇貨，測試模式會唔會一直等？應該點測試？
 
-**會一直等。** Bot 只喺庫存接口話有貨，先至開產品頁加車。Duo 顯示「暫無供應」就會停喺「輪詢中：尚未找到符合條件的貨源」，**加車同結帳試唔到**，所以 541／404 嗰段亦試唔到。
+**會一直等。** 搶 Duo 2TB 就維持揀 `MK2L4ZA/A`（或其他 Duo SKU）。Bot 只喺庫存接口話有貨，先至加車。Duo 顯示「暫無供應」就會停喺「輪詢中：尚未找到符合條件的貨源」，呢個係正常，**唔係 541**。
 
-用一款而家有貨嘅 **iPhone** 試流程（測試模式唔扣款）。步驟同 Duo 一樣：不換購 → 無 AppleCare+ → 加車 → 結帳。**唔好用 MagSafe 做主測試**，配件頁通常冇不換購／AppleCare 嗰兩步。
+只有想試加車／結帳先暫時換一款而家有貨嘅 **iPhone**（測試模式唔扣款）。步驟同 Duo 一樣：不換購 → 無 AppleCare+ → 加車 → 結帳。**唔好用 MagSafe 做主測試**，配件頁通常冇不換購／AppleCare 嗰兩步。
 
 例如（官網有貨先得；無貨就換另一款 iPhone，SKU 喺產品頁網址 `/shop/goto/product/` 後面）：
 
@@ -531,7 +531,7 @@ py app.py
 
 ### Worker 點樣知道有貨然後結帳？
 
-開始運作之後，Worker 每隔幾秒問香港 Apple 官網 `pickup-message`（帶住佢嘅目標 SKU）。回傳入面如果指定門市喺取貨天數內有貨，就會自動打開產品頁、先揀「不換購」同「無 AppleCare+ 服務計劃保障」（加車掣先會亮）、加入購物袋、進入結帳。測試模式會停在最後一步；真實模式會嘗試送出訂單。
+開始運作之後，Worker 會開你揀嘅產品頁（例如 Duo 2TB 夜空色 `MK2L4ZA/A`），再用**視窗裡面嘅** `fetch` 問官網 `fulfillment-messages`（同產品頁自己查庫存同一條）。冇貨會回 JSON「暫無供應」，呢個**唔係** 541。有貨先至揀不換購／無 AppleCare+、加車、結帳。測試模式停在最後一步；真實模式會嘗試送出訂單。
 
 ### 初次點樣登入 Apple ID？幾時先開始搶機？
 
@@ -570,7 +570,7 @@ app.py                  FastAPI：頁面、REST、WebSocket
 preview.html            唔使 Python 都可以用瀏覽器睇個樣
 bot/catalogs.py         香港門市、iPhone Duo SKU、取貨天數
 bot/account.py          從商店頁偵測已登入 Apple ID 電郵
-bot/inventory.py        Apple /retail/pickup-message 庫存解析
+bot/inventory.py        Apple fulfillment-messages／pickup-message 庫存解析
 bot/worker.py           登入 / 待命 / 開始或停止搶購、持久化 Chrome／Chromium
 bot/checkout.py         加車／結帳／自取或送貨／訪客填表；測試模式停在最後一步並輸出計時
 bot/secrets.py          本機加密訪客敏感資料
@@ -583,7 +583,7 @@ secrets/                訪客加密資料（不進 git）
 .env                    本機密鑰（不進 git）
 ```
 
-庫存查詢走香港官網 `pickup-message`，一次回傳全港 6 間 Apple Store，再依該 Worker 勾選的門市與取貨天數過濾。
+庫存查詢喺產品頁用瀏覽器 `fetch` 打 `fulfillment-messages`（失敗先試舊 `pickup-message`），一次回傳全港 6 間 Apple Store，再依該 Worker 勾選的門市與取貨天數過濾。
 
 ## 內建資料
 
