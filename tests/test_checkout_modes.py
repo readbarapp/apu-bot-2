@@ -5,6 +5,7 @@ import re
 
 import pytest
 
+from bot.inventory import StockMatch
 from bot.checkout import (
     ADD_BAG_PATTERN,
     CHECKOUT_PATTERN,
@@ -29,6 +30,8 @@ from bot.checkout import (
     PICKUP_DETAILS_CONTINUE_PATTERN,
     _apply_pickup_location,
     _click_earliest_slot,
+    _handle_fulfillment,
+    _select_pickup_store,
     _fill_phone,
     _guest_nav_done,
     _still_on_signin,
@@ -803,6 +806,15 @@ class _FakePickupControl:
     async def press_sequentially(self, value: str, **_kwargs) -> None:
         await self.fill(value)
 
+    async def is_checked(self) -> bool:
+        return False
+
+    async def is_enabled(self) -> bool:
+        return True
+
+    def filter(self, has_text=None, **_kwargs):
+        return _FakePickupControl(self._page, self._kind, has_text or self._name)
+
 
 @pytest.mark.asyncio
 async def test_apply_pickup_location_fills_hong_kong_and_clicks_apply() -> None:
@@ -843,6 +855,183 @@ async def test_apply_pickup_location_skips_when_stores_already_listed() -> None:
     page = _FakePickupPage(mode="already_applied")
     assert await _apply_pickup_location(page, timeout=400) is True
     assert page.filled == []
+
+
+IFC_MATCH = StockMatch(
+    store_id="R428",
+    store_name="ifc mall",
+    sku="MK2E4ZA/A",
+    quote="今天可取貨",
+    days=0,
+    pickup_display="available",
+)
+
+
+class _FakeFulfillmentPage:
+    CONTACT_URL = "https://secure6.store.apple.com/hk-zh/shop/checkout?_s=PickupContact-init"
+    FULFILL_URL = "https://secure6.store.apple.com/hk-zh/shop/checkout?_s=Fulfillment-init"
+
+    def __init__(self, *, stores_listed: bool = True) -> None:
+        self.url = self.FULFILL_URL
+        self.pickup_checked = stores_listed
+        self.stores_listed = stores_listed
+        self.store_checked: str | None = None
+        self.filled: list[str] = []
+        self.clicks: list[str] = []
+        self.pickup_clicks = 0
+        self.continue_clicks = 0
+        self.keyboard = self
+
+    def get_by_placeholder(self, pattern):
+        return _FakeFulfillHandle(self, "placeholder", pattern)
+
+    def get_by_label(self, pattern):
+        return _FakeFulfillHandle(self, "label", pattern)
+
+    def locator(self, selector: str):
+        return _FakeFulfillHandle(self, "locator", selector)
+
+    def get_by_role(self, role: str, name=None, **_kwargs):
+        return _FakeFulfillHandle(self, role, name)
+
+    def get_by_text(self, pattern, **_kwargs):
+        return _FakeFulfillHandle(self, "text", pattern)
+
+    async def wait_for_url(self, pattern, timeout: int = 0):
+        if re.search(getattr(pattern, "pattern", pattern), self.url, re.I):
+            return
+        raise TimeoutError(self.url)
+
+    async def press(self, key: str) -> None:
+        self.clicks.append(key)
+
+
+class _FakeFulfillHandle:
+    def __init__(self, page: _FakeFulfillmentPage, kind: str, name) -> None:
+        self._page = page
+        self._kind = kind
+        self._name = name
+        self.first = self
+
+    def _text(self) -> str:
+        return str(getattr(self._name, "pattern", self._name) or "")
+
+    def _is_pickup(self) -> bool:
+        return bool(PICKUP_PATTERN.search(self._text()))
+
+    def _is_continue(self) -> bool:
+        return bool(PICKUP_DETAILS_CONTINUE_PATTERN.search(self._text())) or bool(
+            re.search(r"fulfillmentContinue|pickup-continue|fulfillment-continue", self._text(), re.I)
+        )
+
+    def _is_store_radio(self) -> bool:
+        text = self._text()
+        return "R428" in text and bool(
+            re.search(r"input|radio|data-store|data-autom", text, re.I)
+        )
+
+    def _is_store_text(self) -> bool:
+        return bool(re.search(r"ifc mall|R428", self._text(), re.I)) and not self._is_store_radio()
+
+    def _is_listed_copy(self) -> bool:
+        return bool(re.search(r"正在顯示|ifc mall|Apple Store|取貨地點", self._text(), re.I))
+
+    def _visible(self) -> bool:
+        if self._is_continue():
+            return True
+        if self._is_listed_copy():
+            return self._page.stores_listed
+        if self._is_store_radio() or self._is_store_text():
+            return self._page.stores_listed
+        if self._is_pickup():
+            return True
+        if self._kind == "locator" and re.search(
+            r"storelocator|searchInput|search-button|套用|Apply", self._text(), re.I
+        ):
+            return True
+        if self._kind in {"placeholder", "label"} and PICKUP_LOCATION_PATTERN.search(self._text()):
+            return True
+        return self._kind in {"button", "radio", "textbox"}
+
+    async def wait_for(self, **_kwargs) -> None:
+        if not self._visible():
+            raise TimeoutError(f"{self._kind}:{self._name}")
+
+    async def is_visible(self) -> bool:
+        return self._visible()
+
+    async def is_enabled(self) -> bool:
+        if self._is_continue():
+            return self._page.store_checked == "R428"
+        return True
+
+    async def is_checked(self) -> bool:
+        if self._is_pickup():
+            return self._page.pickup_checked
+        if self._is_store_radio():
+            return self._page.store_checked == "R428"
+        return False
+
+    async def get_attribute(self, name: str) -> str:
+        if name == "aria-checked":
+            return "true" if await self.is_checked() else "false"
+        if name == "type":
+            return "radio" if self._is_store_radio() or self._is_pickup() else "text"
+        return ""
+
+    async def fill(self, value: str, **_kwargs) -> None:
+        self._page.filled.append(value)
+
+    async def input_value(self) -> str:
+        return self._page.filled[-1] if self._page.filled else ""
+
+    async def click(self, **_kwargs) -> None:
+        if not self._visible():
+            raise TimeoutError(self._kind)
+        if self._is_continue() and not await self.is_enabled():
+            raise TimeoutError("continue disabled")
+        self._page.clicks.append(self._text())
+        if self._is_pickup():
+            self._page.pickup_clicks += 1
+            if self._page.pickup_checked:
+                self._page.stores_listed = False
+                self._page.store_checked = None
+            self._page.pickup_checked = True
+            return
+        if self._is_store_radio():
+            self._page.store_checked = "R428"
+            return
+        if self._is_continue():
+            self._page.continue_clicks += 1
+            self._page.url = _FakeFulfillmentPage.CONTACT_URL
+            return
+        if "套用" in self._text() or "Apply" in self._text() or "search-button" in self._text().lower():
+            self._page.stores_listed = True
+
+    def filter(self, has_text=None, **_kwargs):
+        return _FakeFulfillHandle(self._page, "label", has_text or self._name)
+
+    async def evaluate(self, _script: str) -> str:
+        return "input"
+
+
+@pytest.mark.asyncio
+async def test_select_pickup_store_does_not_reclick_pickup_when_list_visible() -> None:
+    page = _FakeFulfillmentPage(stores_listed=True)
+    assert await _select_pickup_store(page, IFC_MATCH, timeout=1500) is True
+    assert page.pickup_clicks == 0
+    assert page.filled == []
+    assert page.store_checked == "R428"
+
+
+@pytest.mark.asyncio
+async def test_handle_fulfillment_clicks_continue_once_without_reapplying_hong_kong() -> None:
+    page = _FakeFulfillmentPage(stores_listed=True)
+    assert await _handle_fulfillment(page, IFC_MATCH, "pickup", "guest", None, 7) is None
+    assert page.filled == []
+    assert page.pickup_clicks == 0
+    assert page.continue_clicks == 1
+    assert "PickupContact" in page.url
 
 
 class _FakeContactPage:

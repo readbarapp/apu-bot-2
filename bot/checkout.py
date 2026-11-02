@@ -1117,6 +1117,86 @@ async def _pickup_stores_ready(page) -> bool:
     return await _pickup_stores_visible(page, timeout=800)
 
 
+async def _is_checked(handle) -> bool:
+    try:
+        if await handle.is_checked():
+            return True
+    except Exception:
+        pass
+    try:
+        if str(await handle.get_attribute("aria-checked") or "").lower() == "true":
+            return True
+    except Exception:
+        pass
+    return False
+
+
+async def _pickup_already_active(page) -> bool:
+    """Stores already listed means pickup is selected; re-clicking it resets the locator."""
+    if await _pickup_stores_ready(page):
+        return True
+    locators = [
+        page.get_by_role("radio", name=PICKUP_PATTERN),
+        page.get_by_label(PICKUP_PATTERN),
+    ]
+    for locator in locators:
+        try:
+            handle = locator.first
+            if await _locator_is_visible(handle) and await _is_checked(handle):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _pickup_continue_enabled(page) -> bool:
+    locators = [
+        page.get_by_role("button", name=PICKUP_DETAILS_CONTINUE_PATTERN),
+        page.get_by_role("link", name=PICKUP_DETAILS_CONTINUE_PATTERN),
+    ]
+    for locator in locators:
+        try:
+            handle = locator.first
+            if not await _locator_is_visible(handle):
+                continue
+            try:
+                if await handle.is_enabled():
+                    return True
+            except Exception:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _store_is_selected(page, match: StockMatch) -> bool:
+    selectors = [
+        f'input[type="radio"][value="{match.store_id}"]',
+        f'input[value="{match.store_id}"]',
+        f'[data-store-id="{match.store_id}"]',
+        f'[data-autom*="{match.store_id}" i]',
+    ]
+    for selector in selectors:
+        try:
+            handle = page.locator(selector).first
+            if await _locator_is_visible(handle) and await _is_checked(handle):
+                return True
+        except Exception:
+            continue
+    return await _pickup_continue_enabled(page)
+
+
+async def _wait_store_committed(page, match: StockMatch, timeout: int = 2500) -> bool:
+    deadline = asyncio.get_running_loop().time() + timeout / 1000
+    while asyncio.get_running_loop().time() < deadline:
+        if checkout_stage(getattr(page, "url", "") or "") == "contact":
+            return True
+        if await _store_is_selected(page, match):
+            return True
+        await asyncio.sleep(0.15)
+    return False
+
+
 async def _apply_pickup_location(
     page, query: str = PICKUP_LOCATION, timeout: int = 12_000
 ) -> bool:
@@ -1159,35 +1239,89 @@ async def _apply_pickup_location(
 async def _click_pickup_store(page, match: StockMatch, timeout: int = 4000) -> bool:
     store_pattern = re.compile(re.escape(match.store_name) + r"|" + re.escape(match.store_id), re.I)
     candidates = [
-        page.get_by_text(store_pattern),
-        page.locator(f'[data-store-id="{match.store_id}"]'),
+        page.locator(f'input[type="radio"][value="{match.store_id}"]'),
         page.locator(f'input[value="{match.store_id}"]'),
+        page.locator(f'[data-autom*="{match.store_id}" i]'),
+        page.locator(f'[data-store-id="{match.store_id}"]'),
+        page.get_by_role("radio", name=store_pattern),
+        page.locator("label").filter(has_text=store_pattern),
+        page.get_by_text(store_pattern),
     ]
     for locator in candidates:
         try:
-            await locator.first.wait_for(state="visible", timeout=timeout)
-            await locator.first.click(timeout=3000)
-            return True
+            handle = locator.first
+            await handle.wait_for(state="visible", timeout=timeout)
+            await handle.click(timeout=3000)
+            if await _wait_store_committed(page, match, timeout=2000):
+                return True
         except Exception:
             continue
-    return False
+    return await _wait_store_committed(page, match, timeout=800)
 
 
 async def _select_pickup_store(page, match: StockMatch, timeout: int) -> bool:
-    await _click_choice(page, PICKUP_PATTERN, timeout=timeout)
+    if not await _pickup_already_active(page):
+        await _click_choice(page, PICKUP_PATTERN, timeout=timeout)
     if not await _pickup_stores_ready(page):
         await _apply_pickup_location(page, PICKUP_LOCATION)
-    if await _click_pickup_store(page, match, timeout=2500):
+    if await _click_pickup_store(page, match, timeout=max(timeout, 3000)):
         return True
-    area = (STORE_BY_ID.get(match.store_id) or {}).get("area") or ""
-    for query in (area, match.store_name):
-        if not query:
-            continue
-        await _apply_pickup_location(page, query)
-        if await _click_pickup_store(page, match):
+    if not await _pickup_stores_ready(page):
+        area = (STORE_BY_ID.get(match.store_id) or {}).get("area") or ""
+        for query in (area, match.store_name):
+            if not query:
+                continue
+            await _apply_pickup_location(page, query)
+            if await _click_pickup_store(page, match):
+                return True
+    else:
+        await asyncio.sleep(0.4)
+        if await _click_pickup_store(page, match, timeout=4000):
             return True
     hub.warn("checkout", f"未能自動點選門市 {match.store_name}，將繼續嘗試結帳步驟")
     return False
+
+
+async def _click_pickup_details_continue(page, timeout: int = 10_000) -> bool:
+    """Wait until Apple enables 繼續前往取貨詳情 after the store radio commits."""
+    deadline = asyncio.get_running_loop().time() + max(timeout / 1000, 0.05)
+    while asyncio.get_running_loop().time() < deadline:
+        if checkout_stage(getattr(page, "url", "") or "") == "contact":
+            return True
+        locators = [
+            page.get_by_role("button", name=PICKUP_DETAILS_CONTINUE_PATTERN),
+            page.get_by_role("link", name=PICKUP_DETAILS_CONTINUE_PATTERN),
+            page.locator(
+                '[data-autom*="fulfillmentContinue" i], '
+                '[data-autom*="fulfillment-continue" i], '
+                '[data-autom*="pickup-continue" i]'
+            ),
+            page.get_by_text(PICKUP_DETAILS_CONTINUE_PATTERN),
+        ]
+        for locator in locators:
+            try:
+                handle = locator.first
+                if not await _locator_is_visible(handle):
+                    continue
+                try:
+                    if await handle.is_enabled() is False:
+                        continue
+                except Exception:
+                    pass
+                await handle.click(timeout=2500)
+                try:
+                    await page.wait_for_url(
+                        re.compile(r"PickupContact|timeSlot|Timeslot", re.I),
+                        timeout=4000,
+                    )
+                except Exception:
+                    await asyncio.sleep(0.35)
+                if checkout_stage(getattr(page, "url", "") or "") == "contact":
+                    return True
+            except Exception:
+                continue
+        await asyncio.sleep(0.2)
+    return checkout_stage(getattr(page, "url", "") or "") == "contact"
 
 
 def _looks_like_fulfillment_method(text: str) -> bool:
@@ -1274,19 +1408,12 @@ async def _handle_fulfillment(
         return RETRY_FULFILLMENT
     if checkout_stage(page.url) == "contact":
         return None
-    if not await _maybe_click(page, PICKUP_DETAILS_CONTINUE_PATTERN, timeout=5000):
+    if not await _click_pickup_details_continue(page, timeout=10_000):
         if checkout_stage(page.url) == "contact":
             return None
         hub.warn("checkout", "已揀門市，但未撳到「繼續前往取貨詳情」")
         return RETRY_FULFILLMENT
     hub.info("checkout", "已撳「繼續前往取貨詳情」")
-    try:
-        await page.wait_for_url(
-            re.compile(r"PickupContact|timeSlot|Timeslot", re.I),
-            timeout=5000,
-        )
-    except Exception:
-        await asyncio.sleep(0.8)
     await _click_earliest_slot(page)
     return None
 
