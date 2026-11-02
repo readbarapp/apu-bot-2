@@ -115,6 +115,39 @@ def checkout_is_blocked(url: str) -> bool:
     return any(marker in text for marker in BLOCKED_URL_MARKERS)
 
 
+def block_report(step: str, url: str, title: str = "", extra: str = "") -> str:
+    """One Live Log line the operator can paste back without reading code."""
+    parts = [
+        "【請複製呢段到對話】",
+        f"步驟={step}",
+        f"網址={url or '（無）'}",
+        f"標題={title or '（無）'}",
+        f"被擋頁={'是' if checkout_is_blocked(url) else '否'}",
+    ]
+    if extra:
+        parts.append(extra)
+    return "；".join(parts)
+
+
+async def page_title(page) -> str:
+    try:
+        return str(await page.title() or "")
+    except Exception:
+        return ""
+
+
+async def wait_if_checkout_blocked(page, timeout: int = 8000) -> bool:
+    """True when add-to-bag or checkout navigated to Apple's 541/404 page."""
+    try:
+        await page.wait_for_url(
+            re.compile(r"/shop/bag|/shop/404|/shop/go/404|/shop/541|sorry", re.I),
+            timeout=timeout,
+        )
+    except Exception:
+        pass
+    return checkout_is_blocked(getattr(page, "url", "") or "")
+
+
 def _looks_unexpected(exc: Exception) -> bool:
     text = str(exc).lower()
     markers = (
@@ -445,6 +478,17 @@ async def run_checkout(
             if await _stopped(stop_event):
                 return timer.result(False, "stopped")
             if await _click_add_to_bag(page, timeout=4000):
+                if await wait_if_checkout_blocked(page):
+                    hub.error(
+                        worker_name,
+                        block_report(
+                            "加車",
+                            page.url,
+                            await page_title(page),
+                            "加車掣已撳但跳咗 404/541，未入到購物袋。唔好連撳。可改用平時 Chrome 人手試同一款。",
+                        ),
+                    )
+                    return timer.result(False, "add_to_bag_blocked", pause=True)
                 added = True
                 break
             await _decline_tradein_and_applecare(page)
@@ -462,6 +506,17 @@ async def run_checkout(
             await page.goto(bag_url(), wait_until="domcontentloaded", timeout=30_000)
             if not await _click_visible_checkout(page, timeout=CHECKOUT_STEP_TIMEOUT_MS):
                 await page.goto(checkout_url(), wait_until="domcontentloaded", timeout=30_000)
+        if checkout_is_blocked(page.url):
+            hub.error(
+                worker_name,
+                block_report(
+                    "進入結帳",
+                    page.url,
+                    await page_title(page),
+                    "撳結帳之後跳咗 404/541。",
+                ),
+            )
+            return timer.result(False, "checkout_blocked", pause=True)
         timer.mark("enter_checkout")
 
         if checkout_mode == "guest":
@@ -469,10 +524,14 @@ async def run_checkout(
             if blocked:
                 hub.error(
                     worker_name,
-                    "官網拒絕訪客結帳（POST /shop/signInx 被擋，之後跳 404）。"
-                    "呢個多數係網絡／風控，唔係撳錯掣。請用香港家用網絡再開測試模式。",
+                    block_report(
+                        "訪客結帳",
+                        page.url,
+                        await page_title(page),
+                        "撳咗以訪客身份繼續之後被擋。可改用 Apple ID 模式；唔好連撳訪客。",
+                    ),
                 )
-                return timer.result(False, blocked)
+                return timer.result(False, blocked, pause=True)
 
         step_deadline = asyncio.get_running_loop().time() + 90
         fulfillment_done = False
@@ -480,7 +539,11 @@ async def run_checkout(
             if await _stopped(stop_event):
                 return timer.result(False, "stopped")
             if checkout_is_blocked(page.url):
-                return timer.result(False, "guest_blocked")
+                hub.error(
+                    worker_name,
+                    block_report("結帳途中", page.url, await page_title(page)),
+                )
+                return timer.result(False, "guest_blocked", pause=True)
             if await _on_place_order_step(page):
                 break
             if re.search(r"checkout|fulfillment|pickup|shipping|guest", page.url, re.I) or True:
