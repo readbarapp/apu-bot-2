@@ -970,6 +970,9 @@ class _FakeFulfillHandle:
     async def is_visible(self) -> bool:
         return self._visible()
 
+    async def count(self) -> int:
+        return 1 if self._visible() else 0
+
     async def is_enabled(self) -> bool:
         if self._is_continue():
             return self._page.store_checked == "R428"
@@ -1411,19 +1414,37 @@ async def test_decline_options_before_add_to_bag() -> None:
     assert page.clicks[-1] == "add_bag"
 
 
-def test_performance_report_lists_four_steps() -> None:
+def test_performance_report_lists_pages_not_four_coarse_steps() -> None:
     result = CheckoutResult(
         ok=True,
         reason="dry_run",
-        timings={"add_bag": 1.2, "enter_checkout": 0.8, "fulfillment": 2.5, "payment": 0.6},
-        total_seconds=5.1,
+        timings={
+            "pdp": 0.8,
+            "add_bag": 1.2,
+            "bag": 0.4,
+            "checkout": 1.6,
+            "guest": 2.1,
+            "pickup_search": 3.4,
+            "pickup_store": 1.1,
+            "pickup_continue": 0.9,
+            "contact": 1.5,
+            "contact_continue": 0.6,
+            "billing": 2.4,
+            "review": 0.7,
+        },
+        total_seconds=16.7,
     )
     report = result.report()
-    assert "Step 1 加車" in report
-    assert "Step 2 進入結帳" in report
-    assert "Step 3 處理取貨/送貨" in report
-    assert "Step 4 到達付款前最後一步" in report
-    assert "5.10 秒" in report
+    assert "產品頁（不換購／無 AppleCare+）" in report
+    assert "登入牆（以訪客身份繼續）" in report
+    assert "填地區／套用門市" in report
+    assert "揀指定門市" in report
+    assert "繼續前往取貨詳情" in report
+    assert "取貨人資料" in report
+    assert "信用卡／帳單頁" in report
+    assert "檢查訂單頁" in report
+    assert "16.70 秒" in report
+    assert "Step 1 加車" not in report
     assert INTERRUPT_MESSAGE.startswith("⚠️")
 
 
@@ -1431,13 +1452,13 @@ def test_performance_report_includes_total_when_stopped_at_card() -> None:
     result = CheckoutResult(
         ok=True,
         reason="dry_run",
-        timings={"add_bag": 1.1, "enter_checkout": 0.9, "fulfillment": 3.2, "billing": 2.4},
+        timings={"add_bag": 1.1, "checkout": 0.9, "guest": 2.0, "pickup_store": 3.2, "billing": 2.4},
         total_seconds=8.25,
     )
     report = result.report()
-    assert "到達信用卡頁" in report
+    assert "信用卡／帳單頁" in report
     assert "總耗時 8.25 秒" in report
-    assert "Step 4 到達付款前最後一步" not in report
+    assert "檢查訂單頁" not in report
 
 
 def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
@@ -1491,6 +1512,9 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "唔好用無痕視窗" in readme
     assert "唔使自己開無痕" in readme
     assert "唔會撳立即下單" in readme
+    assert "計時｜" in readme
+    assert "每個結帳分頁" in readme
+    assert "計時｜" in Path("bot/checkout.py").read_text()
     assert "清購物袋會唔會拖慢搶貨" in readme
     assert "唔會再繞去購物袋" in readme
     assert "已清走購物袋" in Path("bot/checkout.py").read_text()

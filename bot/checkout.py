@@ -221,6 +221,29 @@ class CheckoutInterrupted(Exception):
         self.detail = detail or INTERRUPT_MESSAGE
 
 
+PAGE_LABELS = {
+    "empty_bag": "清購物袋",
+    "pdp": "產品頁（不換購／無 AppleCare+）",
+    "add_bag": "加入購物袋",
+    "bag": "購物袋",
+    "checkout": "撳結帳",
+    "enter_checkout": "購物袋／撳結帳",
+    "guest": "登入牆（以訪客身份繼續）",
+    "fulfillment": "揀門市自取／送貨",
+    "pickup_search": "填地區／套用門市",
+    "pickup_store": "揀指定門市",
+    "pickup_continue": "繼續前往取貨詳情",
+    "timeslot": "取貨時段",
+    "contact": "取貨人資料",
+    "contact_continue": "繼續前往付款",
+    "shipping": "送貨地址",
+    "shipping_continue": "送貨頁繼續",
+    "billing": "信用卡／帳單頁",
+    "review": "檢查訂單頁",
+    "payment": "付款前最後一步",
+}
+
+
 @dataclass
 class CheckoutResult:
     ok: bool
@@ -231,15 +254,8 @@ class CheckoutResult:
     quantity: int = 1
 
     def report(self) -> str:
-        labels = {
-            "add_bag": "Step 1 加車",
-            "enter_checkout": "Step 2 進入結帳",
-            "fulfillment": "Step 3 處理取貨/送貨",
-            "billing": "到達信用卡頁",
-            "payment": "Step 4 到達付款前最後一步",
-        }
         parts = [
-            f"{labels.get(name, name)} {seconds:.2f} 秒"
+            f"{PAGE_LABELS.get(name, name)} {seconds:.2f} 秒"
             for name, seconds in self.timings.items()
         ]
         joined = " → ".join(parts) if parts else "未完成計時"
@@ -247,15 +263,22 @@ class CheckoutResult:
 
 
 class StepTimer:
-    def __init__(self) -> None:
+    def __init__(self, worker_name: str = "checkout") -> None:
+        self.worker_name = worker_name
         self.started = time.perf_counter()
         self.last = self.started
         self.marks: dict[str, float] = {}
 
-    def mark(self, name: str) -> None:
+    def mark(self, name: str) -> float:
         now = time.perf_counter()
-        self.marks[name] = round(now - self.last, 3)
+        seconds = round(now - self.last, 3)
+        self.marks[name] = seconds
         self.last = now
+        hub.info(
+            self.worker_name,
+            f"計時｜{PAGE_LABELS.get(name, name)} {seconds:.2f} 秒",
+        )
+        return seconds
 
     def result(
         self,
@@ -284,6 +307,7 @@ class StepTimer:
         level: str = "info",
     ) -> CheckoutResult:
         """Always emit the second-count report, even if the card form cannot continue."""
+        self.worker_name = worker_name or self.worker_name
         result = self.result(ok, reason, pause=pause, quantity=quantity)
         if result.timings or result.total_seconds >= 0.05:
             emit = getattr(hub, level if level in {"info", "warn", "error", "success"} else "info")
@@ -465,20 +489,23 @@ def _looks_unexpected(exc: Exception) -> bool:
 
 
 async def _click_role(page, pattern: re.Pattern[str], timeout: int) -> bool:
-    locator = page.get_by_role("button", name=pattern)
-    try:
-        await locator.first.wait_for(state="visible", timeout=timeout)
-        await locator.first.click(timeout=timeout)
-        return True
-    except Exception:
-        pass
-    locator = page.get_by_text(pattern)
-    try:
-        await locator.first.wait_for(state="visible", timeout=min(timeout, 4000))
-        await locator.first.click(timeout=3000)
-        return True
-    except Exception:
-        return False
+    locators = [
+        page.get_by_role("button", name=pattern),
+        page.get_by_text(pattern),
+    ]
+    for locator in locators:
+        try:
+            n = await _locator_count(locator)
+            if n == 0:
+                continue
+            handle = locator.first
+            if not await _locator_is_visible(handle):
+                await handle.wait_for(state="visible", timeout=min(timeout, 2500))
+            await handle.click(timeout=min(timeout, 3000))
+            return True
+        except Exception:
+            continue
+    return False
 
 
 async def _click_choice(page, pattern: re.Pattern[str], timeout: int = 2500) -> bool:
@@ -614,6 +641,20 @@ async def _locator_is_visible(handle) -> bool:
         return bool(await handle.is_visible())
     except Exception:
         return False
+
+
+async def _locator_count(locator) -> int | None:
+    """None means this test double has no count(); skip the fast-empty path."""
+    fn = getattr(locator, "count", None)
+    if fn is None:
+        first = getattr(locator, "first", None)
+        fn = getattr(first, "count", None)
+    if fn is None:
+        return None
+    try:
+        return int(await fn())
+    except Exception:
+        return None
 
 
 async def _click_guest_button(handle, timeout: int = 2500) -> None:
@@ -902,8 +943,12 @@ async def _fill_labeled(page, patterns: list[str], value: str | list[str]) -> bo
     ]
     for locator in locators:
         try:
+            n = await _locator_count(locator)
+            if n == 0:
+                continue
             handle = locator.first
-            await handle.wait_for(state="visible", timeout=1800)
+            if not await _locator_is_visible(handle):
+                await handle.wait_for(state="visible", timeout=1200)
             if await _apply_fill(handle, values):
                 return True
         except Exception:
@@ -1303,9 +1348,13 @@ async def _click_pickup_store(page, match: StockMatch, timeout: int = 4000) -> b
     ]
     for locator in candidates:
         try:
+            n = await _locator_count(locator)
+            if n == 0:
+                continue
             handle = locator.first
-            await handle.wait_for(state="visible", timeout=timeout)
-            await handle.click(timeout=3000)
+            if not await _locator_is_visible(handle):
+                await handle.wait_for(state="visible", timeout=min(timeout, 800))
+            await handle.click(timeout=2500)
             if await _wait_store_committed(page, match, timeout=2000):
                 return True
         except Exception:
@@ -1313,12 +1362,20 @@ async def _click_pickup_store(page, match: StockMatch, timeout: int = 4000) -> b
     return await _wait_store_committed(page, match, timeout=800)
 
 
-async def _select_pickup_store(page, match: StockMatch, timeout: int) -> bool:
+async def _select_pickup_store(
+    page, match: StockMatch, timeout: int, timer: StepTimer | None = None
+) -> bool:
     if not await _pickup_already_active(page):
         await _click_choice(page, PICKUP_PATTERN, timeout=timeout)
+        if timer:
+            timer.mark("fulfillment")
     if not await _pickup_stores_ready(page):
         await _apply_pickup_location(page, PICKUP_LOCATION)
-    if await _click_pickup_store(page, match, timeout=max(timeout, 3000)):
+        if timer:
+            timer.mark("pickup_search")
+    if await _click_pickup_store(page, match, timeout=max(timeout, 2000)):
+        if timer:
+            timer.mark("pickup_store")
         return True
     if not await _pickup_stores_ready(page):
         area = (STORE_BY_ID.get(match.store_id) or {}).get("area") or ""
@@ -1326,11 +1383,18 @@ async def _select_pickup_store(page, match: StockMatch, timeout: int) -> bool:
             if not query:
                 continue
             await _apply_pickup_location(page, query)
+            if timer:
+                timer.mark("pickup_search")
             if await _click_pickup_store(page, match):
+                if timer:
+                    timer.mark("pickup_store")
                 return True
     else:
-        await asyncio.sleep(0.4)
-        if await _click_pickup_store(page, match, timeout=4000):
+        hub.info("checkout", "門市清單已喺，唔會再填 Hong Kong，只再撳指定店")
+        await asyncio.sleep(0.35)
+        if await _click_pickup_store(page, match, timeout=1500):
+            if timer:
+                timer.mark("pickup_store")
             return True
     hub.warn("checkout", f"未能自動點選門市 {match.store_name}，將繼續嘗試結帳步驟")
     return False
@@ -1451,24 +1515,52 @@ async def _handle_fulfillment(
     checkout_mode: str,
     guest: GuestProfile | None,
     delivery_max_days: int,
+    timer: StepTimer | None = None,
 ) -> str | None:
     if fulfillment == "delivery":
         await _click_choice(page, DELIVERY_PATTERN, timeout=4000)
+        if timer:
+            timer.mark("fulfillment")
         return await _abort_if_delivery_too_slow(page, match, delivery_max_days)
 
     if checkout_stage(page.url) == "contact":
         return None
-    if not await _select_pickup_store(page, match, timeout=4000):
-        return RETRY_FULFILLMENT
+    if not await _select_pickup_store(page, match, timeout=4000, timer=timer):
+        if await _pickup_stores_ready(page):
+            hub.warn("checkout", "門市清單已喺但仍未揀到店，再撳一次指定店，唔會重填 Hong Kong")
+            if not await _click_pickup_store(page, match, timeout=1500):
+                return RETRY_FULFILLMENT
+            if timer and "pickup_store" not in timer.marks:
+                timer.mark("pickup_store")
+        else:
+            return RETRY_FULFILLMENT
     if checkout_stage(page.url) == "contact":
         return None
     if not await _click_pickup_details_continue(page, timeout=10_000):
         if checkout_stage(page.url) == "contact":
+            if timer:
+                timer.mark("pickup_continue")
+            return None
+        if await _store_is_selected(page, match):
+            hub.warn(
+                "checkout",
+                "已揀門市，繼續掣未跳頁。再等一次，唔會重填 Hong Kong、亦唔會再撳「我會前來取貨」。",
+            )
+            await _click_pickup_details_continue(page, timeout=8000)
+            if timer:
+                timer.mark("pickup_continue")
+            if checkout_stage(page.url) == "contact":
+                hub.info("checkout", "已撳「繼續前往取貨詳情」")
+                await _click_earliest_slot(page)
+                return None
             return None
         hub.warn("checkout", "已揀門市，但未撳到「繼續前往取貨詳情」")
         return RETRY_FULFILLMENT
+    if timer:
+        timer.mark("pickup_continue")
     hub.info("checkout", "已撳「繼續前往取貨詳情」")
-    await _click_earliest_slot(page)
+    if await _click_earliest_slot(page) and timer:
+        timer.mark("timeslot")
     return None
 
 
@@ -1486,7 +1578,7 @@ async def run_checkout(
     quantity: int = 1,
     empty_bag: bool = True,
 ) -> CheckoutResult:
-    timer = StepTimer()
+    timer = StepTimer(worker_name)
     if await _stopped(stop_event):
         return timer.announce(worker_name, False, "stopped")
 
@@ -1495,6 +1587,7 @@ async def run_checkout(
         hub.info(worker_name, f"開始搶購 {sku}（{where}）")
         if empty_bag:
             await _empty_bag(page)
+            timer.mark("empty_bag")
         await page.goto(product_url(sku), wait_until="domcontentloaded", timeout=45_000)
         await _wait_for_configured_pdp(page)
         if await _stopped(stop_event):
@@ -1502,6 +1595,7 @@ async def run_checkout(
 
         hub.info(worker_name, f"產品頁已開（{page.url}），先揀不換購同無 AppleCare+，再開加車")
         await _decline_tradein_and_applecare(page)
+        timer.mark("pdp")
 
         deadline = asyncio.get_running_loop().time() + 45
         added = False
@@ -1537,6 +1631,7 @@ async def run_checkout(
         bag_qty = 1
         await _open_bag(page)
         bag_qty = await _set_bag_quantity(page, quantity)
+        timer.mark("bag")
         hub.info(worker_name, "進入結帳（唔會撳 Apple Pay）")
         if not await _click_visible_checkout(page, timeout=CHECKOUT_STEP_TIMEOUT_MS):
             await page.goto(bag_url(), wait_until="domcontentloaded", timeout=30_000)
@@ -1561,7 +1656,7 @@ async def run_checkout(
                 ),
             )
             return timer.announce(worker_name, False, "checkout_blocked", pause=True)
-        timer.mark("enter_checkout")
+        timer.mark("checkout")
 
         guest_clicked = False
         if checkout_mode == "guest":
@@ -1595,8 +1690,12 @@ async def run_checkout(
                 )
                 return timer.announce(worker_name, False, "guest_blocked", pause=True)
             if await _on_place_order_step(page):
+                if "review" not in timer.marks:
+                    timer.mark("review")
                 break
             stage = checkout_stage(page.url)
+            if stage != "signin" and "guest" not in timer.marks:
+                timer.mark("guest")
             if checkout_mode == "guest" and stage == "signin":
                 if guest_clicked:
                     await asyncio.sleep(0.8)
@@ -1625,6 +1724,7 @@ async def run_checkout(
                     checkout_mode,
                     guest,
                     delivery_max_days,
+                    timer=timer,
                 )
                 if skipped == RETRY_FULFILLMENT:
                     if stage == "fulfillment":
@@ -1632,29 +1732,42 @@ async def run_checkout(
                         continue
                     skipped = None
                 fulfillment_done = True
-                timer.mark("fulfillment")
                 if skipped:
                     return timer.announce(worker_name, False, skipped)
+                continue
             if checkout_mode == "guest" and stage == "contact" and not contact_done:
                 await _fill_contact(page, guest)
                 contact_done = True
+                timer.mark("contact")
+                await _maybe_click(page, CONTINUE_PATTERN, timeout=4000)
+                timer.mark("contact_continue")
+                continue
             if checkout_mode == "guest" and stage == "shipping" and not shipping_done:
                 await _fill_shipping(page, guest)
                 shipping_done = True
+                timer.mark("shipping")
                 skipped = await _abort_if_delivery_too_slow(page, match, delivery_max_days)
                 if skipped:
                     return timer.announce(worker_name, False, skipped)
+                await _maybe_click(page, CONTINUE_PATTERN, timeout=4000)
+                timer.mark("shipping_continue")
+                continue
             if checkout_mode == "guest" and stage == "billing" and not billing_done:
                 await _fill_billing(page, guest)
                 billing_done = True
                 timer.mark("billing")
-            if await _on_place_order_step(page):
-                break
-            if stage == "billing":
-                await _maybe_click(page, REVIEW_ORDER_PATTERN, timeout=CHECKOUT_STEP_TIMEOUT_MS)
-            else:
-                await _maybe_click(page, CONTINUE_PATTERN, timeout=CHECKOUT_STEP_TIMEOUT_MS)
-            await asyncio.sleep(0.5)
+                await _maybe_click(page, REVIEW_ORDER_PATTERN, timeout=4000)
+                if await _on_place_order_step(page):
+                    timer.mark("review")
+                    break
+                if test_mode:
+                    hub.info(
+                        worker_name,
+                        "測試模式：已填信用卡。檢查訂單掣未出現或未跳頁（測試卡多數停呢度），唔會再空等。",
+                    )
+                    break
+                continue
+            await asyncio.sleep(0.35)
 
         if checkout_mode == "guest" and _still_on_signin(page.url):
             hub.error(
@@ -1671,9 +1784,9 @@ async def run_checkout(
         reached_end = await _on_place_order_step(page)
         reached_card = billing_done or checkout_stage(page.url) == "billing"
         if test_mode and (reached_end or reached_card):
-            if reached_end:
-                timer.mark("payment")
-            elif "billing" not in timer.marks:
+            if reached_end and "review" not in timer.marks:
+                timer.mark("review")
+            elif not reached_end and "billing" not in timer.marks:
                 timer.mark("billing")
             stop_at = (
                 "檢查訂單頁（唔會撳立即下單）"
@@ -1690,7 +1803,8 @@ async def run_checkout(
 
         if not reached_end:
             raise CheckoutInterrupted("找不到付款前最後一步，可能被新頁面或手動操作打斷")
-        timer.mark("payment")
+        if "review" not in timer.marks:
+            timer.mark("review")
 
         hub.warn(worker_name, "真實下單模式：正在送出訂單")
         if not await _click_role(page, PLACE_ORDER_PATTERN, CHECKOUT_STEP_TIMEOUT_MS):
