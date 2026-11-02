@@ -5,7 +5,15 @@ import re
 import time
 from dataclasses import dataclass, field
 
-from bot.catalogs import APPLE_LOCALE, CHECKOUT_STEP_TIMEOUT_MS, bag_url, checkout_url, product_url
+from bot.catalogs import (
+    APPLE_LOCALE,
+    CHECKOUT_STEP_TIMEOUT_MS,
+    PICKUP_LOCATION,
+    STORE_BY_ID,
+    bag_url,
+    checkout_url,
+    product_url,
+)
 from bot.inventory import StockMatch, days_from_quote
 from bot.logs import hub
 from bot.models import GuestProfile
@@ -38,6 +46,11 @@ PICKUP_PATTERN = re.compile(
 )
 DELIVERY_PATTERN = re.compile(
     r"我希望送貨|I want it delivered|I['’]?d like delivery|Ship to me",
+    re.I,
+)
+APPLY_PATTERN = re.compile(r"^套用$|^Apply$", re.I)
+PICKUP_LOCATION_PATTERN = re.compile(
+    r"地區|中環|城市|搜尋|search|retail|零售店|附近",
     re.I,
 )
 GUEST_PATTERN = re.compile(
@@ -814,8 +827,46 @@ async def _fill_guest(page, guest: GuestProfile | None) -> None:
     await _fill_billing(page, guest)
 
 
-async def _select_pickup_store(page, match: StockMatch, timeout: int) -> None:
-    await _click_choice(page, PICKUP_PATTERN, timeout=timeout)
+async def _apply_pickup_location(page, query: str = PICKUP_LOCATION) -> bool:
+    """Apple HK hides pickup stores until a district is applied. Hong Kong lists all six."""
+    locators = [
+        page.get_by_placeholder(PICKUP_LOCATION_PATTERN),
+        page.get_by_label(PICKUP_LOCATION_PATTERN),
+        page.locator(
+            'input[placeholder*="地區"], input[placeholder*="中環"], '
+            'input[data-autom*="location" i], input[data-autom*="city" i], '
+            'input[name*="location" i], input[id*="location" i]'
+        ),
+    ]
+    filled = False
+    for locator in locators:
+        try:
+            handle = locator.first
+            await handle.wait_for(state="visible", timeout=1800)
+            await handle.fill(query, timeout=2000)
+            filled = True
+            break
+        except Exception:
+            continue
+    if not filled:
+        return False
+    if not await _click_role(page, APPLY_PATTERN, timeout=2500):
+        try:
+            await page.keyboard.press("Enter")
+        except Exception:
+            pass
+    try:
+        await page.get_by_text(re.compile(r"Apple Store|ifc mall|Hysan|Festival Walk|取貨地點", re.I)).first.wait_for(
+            state="visible",
+            timeout=5000,
+        )
+    except Exception:
+        await asyncio.sleep(0.8)
+    hub.info("checkout", f"已填「{query}」並撳套用")
+    return True
+
+
+async def _click_pickup_store(page, match: StockMatch, timeout: int = 4000) -> bool:
     store_pattern = re.compile(re.escape(match.store_name) + r"|" + re.escape(match.store_id), re.I)
     candidates = [
         page.get_by_text(store_pattern),
@@ -824,18 +875,27 @@ async def _select_pickup_store(page, match: StockMatch, timeout: int) -> None:
     ]
     for locator in candidates:
         try:
-            await locator.first.wait_for(state="visible", timeout=4000)
+            await locator.first.wait_for(state="visible", timeout=timeout)
             await locator.first.click(timeout=3000)
-            return
+            return True
         except Exception:
             continue
-    search = page.get_by_placeholder(re.compile(r"地區|城市|search|搜尋", re.I))
-    try:
-        await search.first.fill(match.store_name, timeout=3000)
-        await page.keyboard.press("Enter")
-        await page.get_by_text(store_pattern).first.click(timeout=5000)
-    except Exception:
-        hub.warn("checkout", f"未能自動點選門市 {match.store_name}，將繼續嘗試結帳步驟")
+    return False
+
+
+async def _select_pickup_store(page, match: StockMatch, timeout: int) -> None:
+    await _click_choice(page, PICKUP_PATTERN, timeout=timeout)
+    await _apply_pickup_location(page, PICKUP_LOCATION)
+    if await _click_pickup_store(page, match):
+        return
+    area = (STORE_BY_ID.get(match.store_id) or {}).get("area") or ""
+    for query in (area, match.store_name):
+        if not query:
+            continue
+        await _apply_pickup_location(page, query)
+        if await _click_pickup_store(page, match):
+            return
+    hub.warn("checkout", f"未能自動點選門市 {match.store_name}，將繼續嘗試結帳步驟")
 
 
 async def _click_earliest_slot(page) -> None:
