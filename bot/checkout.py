@@ -37,7 +37,15 @@ SKIP_PATTERN = re.compile(
     r"No trade-in|Skip|略過此步驟|現在不要|不加入",
     re.I,
 )
-CONTINUE_PATTERN = re.compile(r"繼續前往付款|繼續結帳|^繼續$|^Continue$|Continue to Payment", re.I)
+CONTINUE_PATTERN = re.compile(
+    r"繼續前往取貨詳情|繼續前往送貨詳情|繼續前往付款|繼續結帳|^繼續$|"
+    r"^Continue$|Continue to Pickup|Continue to Delivery|Continue to Payment",
+    re.I,
+)
+TIMESLOT_PATTERN = re.compile(
+    r"上午|下午|\d{1,2}:\d{2}|AM|PM|時段|time\s*slot|timeslot",
+    re.I,
+)
 REVIEW_ORDER_PATTERN = re.compile(r"檢查你的訂單|Review Your Order|Review Order", re.I)
 CREDIT_CARD_PATTERN = re.compile(r"信用卡或扣帳卡|Credit or Debit Card|Credit Card", re.I)
 PICKUP_PATTERN = re.compile(
@@ -1087,20 +1095,50 @@ async def _select_pickup_store(page, match: StockMatch, timeout: int) -> bool:
     return False
 
 
-async def _click_earliest_slot(page) -> None:
+def _looks_like_fulfillment_method(text: str) -> bool:
+    blob = text or ""
+    return bool(DELIVERY_PATTERN.search(blob) or PICKUP_PATTERN.search(blob))
+
+
+async def _control_label(handle) -> str:
+    parts: list[str] = []
+    for reader in (
+        lambda: handle.inner_text(),
+        lambda: handle.get_attribute("aria-label"),
+        lambda: handle.get_attribute("data-autom"),
+        lambda: handle.get_attribute("name"),
+        lambda: handle.get_attribute("value"),
+    ):
+        try:
+            parts.append(str(await reader() or ""))
+        except Exception:
+            continue
+    return " ".join(parts)
+
+
+async def _click_earliest_slot(page) -> bool:
+    """Click a pickup time slot only. Never the 送貨/取貨 method radios on this page."""
     locators = [
-        page.locator("input[type='radio']:visible"),
-        page.get_by_role("radio"),
-        page.locator("[data-timeslot], .timeslot, .time-slot, [name*='timeSlot' i]"),
-        page.get_by_role("button", name=re.compile(r"上午|下午|\d{1,2}:\d{2}|AM|PM")),
+        page.locator(
+            "[data-autom*='timeslot' i], [data-autom*='timeSlot' i], "
+            "[data-autom*='time-slot' i], [data-timeslot], "
+            ".timeslot, .time-slot, [name*='timeSlot' i]"
+        ),
+        page.get_by_role("radio", name=TIMESLOT_PATTERN),
+        page.get_by_role("button", name=TIMESLOT_PATTERN),
+        page.get_by_label(TIMESLOT_PATTERN),
     ]
     for locator in locators:
         try:
-            await locator.first.wait_for(state="visible", timeout=2500)
-            await locator.first.click(timeout=2000)
-            return
+            handle = locator.first
+            await handle.wait_for(state="visible", timeout=1500)
+            if _looks_like_fulfillment_method(await _control_label(handle)):
+                continue
+            await handle.click(timeout=2000)
+            return True
         except Exception:
             continue
+    return False
 
 
 async def _delivery_days_from_page(page) -> int | None:
@@ -1137,6 +1175,17 @@ async def _handle_fulfillment(
 
     if not await _select_pickup_store(page, match, timeout=4000):
         return RETRY_FULFILLMENT
+    if not await _maybe_click(page, CONTINUE_PATTERN, timeout=5000):
+        hub.warn("checkout", "已揀門市，但未撳到「繼續前往取貨詳情」")
+        return RETRY_FULFILLMENT
+    hub.info("checkout", "已撳「繼續前往取貨詳情」")
+    try:
+        await page.wait_for_url(
+            re.compile(r"PickupContact|timeSlot|Timeslot", re.I),
+            timeout=5000,
+        )
+    except Exception:
+        await asyncio.sleep(0.8)
     await _click_earliest_slot(page)
     return None
 
