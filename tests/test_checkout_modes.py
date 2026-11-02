@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import time
 
 import pytest
 
@@ -39,6 +40,9 @@ from bot.checkout import (
     _still_on_signin,
     guest_block_extra,
     _decline_tradein_and_applecare,
+    _choose_credit_card,
+    _click_pickup_details_continue,
+    _fill_billing,
     _fill_card_expiry,
     _fill_contact,
     _fill_guest,
@@ -178,6 +182,12 @@ class _FakeExpiryHandle:
 
     async def count(self) -> int:
         return 1 if self._kind in self._page.fields else 0
+
+    async def is_visible(self) -> bool:
+        return self._kind in self._page.fields
+
+    def filter(self, has_text=None, **_kwargs):
+        return _FakeExpiryHandle(self._page, "missing")
 
     async def click(self, **_kwargs) -> None:
         return None
@@ -1100,6 +1110,12 @@ class _FakeContactHandle:
         if self._kind == "missing":
             raise TimeoutError(self._kind)
 
+    async def count(self) -> int:
+        return 0 if self._kind == "missing" else 1
+
+    async def is_visible(self) -> bool:
+        return self._kind != "missing"
+
     async def get_attribute(self, name: str) -> str:
         if name == "type":
             return self._type
@@ -1136,6 +1152,164 @@ async def test_fill_contact_fills_phone() -> None:
     )
     await _fill_contact(page, guest)
     assert page.filled["phone"] == "51234567"
+
+
+BILLING_GUEST = GuestProfile(
+    last_name="Chan",
+    first_name="Tai Man",
+    email="chan@example.com",
+    phone="51234567",
+    address_street="中環金融街 8 號",
+    address_building="國際金融中心一期 15 樓 1501 室",
+    card_number="4111111111111111",
+    card_month="12",
+    card_year="2028",
+    cvv="123",
+)
+
+
+class _FakeBillingPage:
+    BILLING_URL = "https://secure7.store.apple.com/hk-zh/shop/checkout?_s=Billing-init"
+
+    def __init__(self, *, button_delay: float = 0.0) -> None:
+        self.url = self.BILLING_URL
+        self.button_delay = button_delay
+        self.started = time.perf_counter()
+        self.method_clicked = False
+        self.clicks: list[str] = []
+        self.filled: dict[str, str] = {}
+
+    def _button_ready(self) -> bool:
+        return time.perf_counter() - self.started >= self.button_delay
+
+    def get_by_placeholder(self, pattern, **_kwargs):
+        return _FakeBillingHandle(self, "placeholder", pattern)
+
+    def get_by_label(self, pattern, **_kwargs):
+        return _FakeBillingHandle(self, "label", pattern)
+
+    def locator(self, selector: str):
+        return _FakeBillingHandle(self, "locator", selector)
+
+    def get_by_role(self, role: str, name=None, **_kwargs):
+        return _FakeBillingHandle(self, role, name)
+
+    def get_by_text(self, pattern, **_kwargs):
+        return _FakeBillingHandle(self, "text", pattern)
+
+
+class _FakeBillingHandle:
+    def __init__(self, page: _FakeBillingPage, kind: str, name) -> None:
+        self._page = page
+        self._kind = kind
+        self._name = name
+        self.first = self
+
+    def _text(self) -> str:
+        return str(getattr(self._name, "pattern", self._name) or "")
+
+    def _is_card_number(self) -> bool:
+        return bool(re.search(r"卡號|信用卡號碼|cardNumber|cc-number|card-number", self._text(), re.I))
+
+    def _is_credit_method(self) -> bool:
+        text = self._text()
+        if self._is_card_number():
+            return False
+        if CREDIT_CARD_PATTERN.search(text):
+            return True
+        return bool(re.search(r"creditcard|credit-card|creditCard|credit_card", text, re.I))
+
+    def _is_broad_card_autom(self) -> bool:
+        text = self._text()
+        return bool(re.search(r'data-autom\*=["\']card["\']', text, re.I)) and "credit" not in text.lower()
+
+    def _visible(self) -> bool:
+        if self._is_broad_card_autom():
+            return True
+        if self._is_credit_method():
+            return self._page._button_ready()
+        if self._is_card_number():
+            return self._page.method_clicked
+        return False
+
+    async def wait_for(self, **_kwargs) -> None:
+        if not self._visible():
+            raise TimeoutError(self._text())
+
+    async def is_visible(self) -> bool:
+        return self._visible()
+
+    async def count(self) -> int:
+        return 1 if self._visible() or self._is_broad_card_autom() else 0
+
+    async def click(self, **_kwargs) -> None:
+        if self._is_broad_card_autom() and not self._is_credit_method():
+            self._page.clicks.append("wrong-card-autom")
+            return
+        if not self._visible():
+            raise TimeoutError("not visible")
+        if self._is_credit_method():
+            self._page.method_clicked = True
+            self._page.clicks.append("credit-card")
+            return
+        self._page.clicks.append(self._text())
+
+    async def fill(self, value: str, **_kwargs) -> None:
+        if self._is_card_number():
+            self._page.filled["card_number"] = value
+            return
+        self._page.filled[self._text() or self._kind] = value
+
+    async def get_attribute(self, _name: str) -> str:
+        return ""
+
+    async def evaluate(self, _script: str) -> str:
+        return "input"
+
+    async def scroll_into_view_if_needed(self, **_kwargs) -> None:
+        return None
+
+    def filter(self, has_text=None, **_kwargs):
+        return _FakeBillingHandle(self._page, "label", has_text or self._name)
+
+
+@pytest.mark.asyncio
+async def test_choose_credit_card_clicks_as_soon_as_button_appears() -> None:
+    page = _FakeBillingPage(button_delay=0.35)
+    started = time.perf_counter()
+    assert await _choose_credit_card(page) is True
+    elapsed = time.perf_counter() - started
+    assert page.method_clicked is True
+    assert page.clicks[0] == "credit-card"
+    assert "wrong-card-autom" not in page.clicks
+    assert elapsed < 1.8
+
+
+@pytest.mark.asyncio
+async def test_choose_credit_card_does_not_click_generic_card_autom() -> None:
+    page = _FakeBillingPage(button_delay=0.2)
+    await _choose_credit_card(page)
+    assert "wrong-card-autom" not in page.clicks
+    assert "credit-card" in page.clicks
+
+
+@pytest.mark.asyncio
+async def test_fill_billing_clicks_payment_method_then_fills_card_number() -> None:
+    page = _FakeBillingPage(button_delay=0.25)
+    await _fill_billing(page, BILLING_GUEST)
+    assert page.method_clicked is True
+    assert page.filled.get("card_number") == "4111111111111111"
+    assert "wrong-card-autom" not in page.clicks
+
+
+@pytest.mark.asyncio
+async def test_click_pickup_details_continue_returns_when_already_on_contact() -> None:
+    page = _FakeFulfillmentPage(stores_listed=True)
+    page.url = _FakeFulfillmentPage.CONTACT_URL
+    started = time.perf_counter()
+    assert await _click_pickup_details_continue(page, timeout=4000) is True
+    assert page.continue_clicks == 0
+    assert time.perf_counter() - started < 0.5
 
 
 class _FakeSlotPage:
@@ -1528,6 +1702,8 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "唔會撳立即下單" in readme
     assert "計時｜" in readme
     assert "每個結帳分頁" in readme
+    assert "已撳「信用卡或扣帳卡」" in Path("bot/checkout.py").read_text()
+    assert "暫停計時" in Path("bot/checkout.py").read_text()
     assert "計時｜" in Path("bot/checkout.py").read_text()
     assert "清購物袋會唔會拖慢搶貨" in readme
     assert "唔會再繞去購物袋" in readme
@@ -1555,6 +1731,8 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "繼續前往付款" in readme
     assert "繼續前往取貨詳情" in readme
     assert "信用卡或扣帳卡" in readme
+    assert "已撳「信用卡或扣帳卡」" in readme
+    assert "入晒所有資料之後即停計時" in readme
     assert "檢查你的訂單" in readme
     assert "使用 Apple Pay 結帳" in readme
     assert "我會前來取貨" in readme
