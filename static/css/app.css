@@ -454,9 +454,6 @@ h2 { font-size: 16px; }
 
 .badge.paused { color: var(--red); border-color: rgba(244, 63, 94, 0.45); }
 
-.worker-card[data-checkout="guest"] .session-field,
-.worker-card[data-checkout="guest"] .account-bar { display: none; }
-.worker-card[data-checkout="apple_id"] .guest-fields { display: none; }
 .worker-card[data-fulfillment="delivery"] .pickup-fields { display: none; }
 .worker-card[data-fulfillment="pickup"] .delivery-fields { display: none; }
 

@@ -105,7 +105,7 @@ class BotManager:
     def _get(self, worker_id: str) -> Worker:
         worker = self.workers.get(worker_id)
         if not worker:
-            raise EngineError("找不到這個 Worker。請先儲存設定，再登入或啟動。", 404)
+            raise EngineError("找不到這個 Worker。請先儲存設定，再開始運作。", 404)
         return worker
 
     async def login_worker(self, profile: WorkerProfile, test_mode: bool) -> dict:
@@ -155,28 +155,9 @@ class BotManager:
             hub.warn("system", "真實下單模式：偵測到符合條件的貨源時將自動送出訂單並可能信用卡扣款")
 
         ready: list[Worker] = []
-        pending: list[str] = []
         for profile in request.workers:
             worker = await self._upsert(self._hydrate(profile), request.test_mode)
-            if worker.profile.checkout_mode == "guest":
-                ready.append(worker)
-                continue
-            if not worker.logged_in and not worker.apple_id and worker.context is not None:
-                try:
-                    await worker.refresh_account()
-                except Exception as exc:
-                    hub.warn(worker.profile.name, f"檢查登入狀態失敗：{exc}")
-            if worker.logged_in or worker.apple_id:
-                ready.append(worker)
-            else:
-                pending.append(worker.profile.name)
-
-        if pending:
-            names = "、".join(pending)
-            raise EngineError(
-                f"仲有 Worker 未登入 Apple ID：{names}。請登入或刪除未登入嘅 Worker，先至可以全部開始搶機。",
-                409,
-            )
+            ready.append(worker)
 
         for worker in ready:
             try:
@@ -201,7 +182,7 @@ class BotManager:
     async def focus_worker(self, worker_id: str) -> dict:
         worker = self._get(worker_id)
         if worker.context is None:
-            raise EngineError("此 Worker 目前沒有開啟的瀏覽器視窗。請先撳「登入 Apple ID」。", 409)
+            raise EngineError("此 Worker 目前沒有開啟的瀏覽器視窗。請先撳「開始運作」。", 409)
         await worker.bring_to_front()
         hub.info(worker.profile.name, "前端要求顯示此 Worker 視窗")
         return {"ok": True, "id": worker_id}

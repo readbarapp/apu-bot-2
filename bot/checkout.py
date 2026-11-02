@@ -21,6 +21,10 @@ from bot.models import GuestProfile
 PLACE_ORDER_PATTERN = re.compile(r"立即下單|下訂單|Place Your Order|Place Order", re.I)
 ADD_BAG_PATTERN = re.compile(r"加入購物袋|Add to Bag|Add to Cart", re.I)
 VIEW_BAG_PATTERN = re.compile(r"查看購物袋|View Bag|Review Bag", re.I)
+REMOVE_BAG_PATTERN = re.compile(
+    r"^移除$|^刪除$|^Remove$|從購物袋移除|Remove from Bag|Remove Item",
+    re.I,
+)
 NO_TRADEIN_PATTERN = re.compile(
     r"^不換購$|不使用折抵|不使用 iPhone 折抵|No trade-?in",
     re.I,
@@ -395,6 +399,40 @@ async def _open_bag(page) -> None:
         await page.goto(bag_url(), wait_until="domcontentloaded", timeout=30_000)
 
 
+async def _empty_bag(page) -> int:
+    """Drop leftover test items so checkout does not buy 17e + Duo together."""
+    try:
+        await _open_bag(page)
+    except Exception:
+        return 0
+    removed = 0
+    for _ in range(12):
+        clicked = False
+        locators = [
+            page.get_by_role("button", name=REMOVE_BAG_PATTERN),
+            page.get_by_role("link", name=REMOVE_BAG_PATTERN),
+            page.locator('[data-autom*="remove" i][data-autom*="bag" i]'),
+            page.locator('[data-autom*="removeitem" i], [data-autom*="remove-item" i]'),
+            page.locator('button[aria-label*="移除" i], button[aria-label*="Remove" i]'),
+        ]
+        for locator in locators:
+            try:
+                handle = locator.first
+                await handle.wait_for(state="visible", timeout=1200)
+                await handle.click(timeout=2000)
+                removed += 1
+                clicked = True
+                await asyncio.sleep(0.45)
+                break
+            except Exception:
+                continue
+        if not clicked:
+            break
+    if removed:
+        hub.info("checkout", f"已清走購物袋入面 {removed} 件舊貨，避免連測試型號一齊結帳")
+    return removed
+
+
 def _looks_unexpected(exc: Exception) -> bool:
     text = str(exc).lower()
     markers = (
@@ -578,8 +616,8 @@ def guest_block_extra(reason: str) -> str:
     if reason == "guest_button_missed":
         return "畫面停喺登入牆，搵唔到「以訪客身份繼續」。"
     if reason == "guest_nav_timeout":
-        return "撳咗以訪客身份繼續之後頁面未跳去結帳。可改用 Apple ID 模式；唔好連撳訪客。"
-    return "撳咗以訪客身份繼續之後被擋。可改用 Apple ID 模式；唔好連撳訪客。"
+        return "撳咗以訪客身份繼續之後頁面未跳去結帳。唔好連撳訪客。"
+    return "撳咗以訪客身份繼續之後被擋。唔好連撳訪客。"
 
 
 def _still_on_signin(url: str) -> bool:
@@ -1425,7 +1463,7 @@ async def run_checkout(
     test_mode: bool,
     worker_name: str,
     stop_event: asyncio.Event,
-    checkout_mode: str = "apple_id",
+    checkout_mode: str = "guest",
     fulfillment: str = "pickup",
     guest: GuestProfile | None = None,
     delivery_max_days: int = 7,
@@ -1438,6 +1476,7 @@ async def run_checkout(
     try:
         where = match.store_name if fulfillment == "pickup" else f"送貨 {delivery_max_days} 日內"
         hub.info(worker_name, f"開始搶購 {sku}（{where}）")
+        await _empty_bag(page)
         await page.goto(product_url(sku), wait_until="domcontentloaded", timeout=45_000)
         await _wait_for_configured_pdp(page)
         if await _stopped(stop_event):
@@ -1591,14 +1630,9 @@ async def run_checkout(
                 await _fill_billing(page, guest)
                 billing_done = True
                 timer.mark("billing")
-                if test_mode:
-                    # Test cards often cannot pass Apple's check; the card form is the last measurable step.
-                    break
             if await _on_place_order_step(page):
                 break
             if stage == "billing":
-                if test_mode and billing_done:
-                    break
                 await _maybe_click(page, REVIEW_ORDER_PATTERN, timeout=CHECKOUT_STEP_TIMEOUT_MS)
             else:
                 await _maybe_click(page, CONTINUE_PATTERN, timeout=CHECKOUT_STEP_TIMEOUT_MS)
@@ -1623,7 +1657,11 @@ async def run_checkout(
                 timer.mark("payment")
             elif "billing" not in timer.marks:
                 timer.mark("billing")
-            stop_at = "付款前最後一步" if reached_end else "信用卡／付款頁（測試卡可能無法繼續，唔影響計時）"
+            stop_at = (
+                "檢查訂單頁（唔會撳立即下單）"
+                if reached_end
+                else "信用卡／付款頁（測試卡過唔到就停呢度；用真卡、測試模式仍然開住，就可以去到檢查訂單頁）"
+            )
             hub.success(
                 worker_name,
                 f"測試模式：已停在{stop_at}，不會送出訂單。目前頁面：{page.url}",

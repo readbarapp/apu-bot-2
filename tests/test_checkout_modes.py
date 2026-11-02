@@ -30,6 +30,7 @@ from bot.checkout import (
     PICKUP_DETAILS_CONTINUE_PATTERN,
     _apply_pickup_location,
     _click_earliest_slot,
+    _empty_bag,
     _handle_fulfillment,
     _select_pickup_store,
     _fill_phone,
@@ -71,6 +72,19 @@ SAMPLE_WORKER = {
     "stores": ["R428", "R409"],
     "pickup_window": "1d",
     "max_qty": 1,
+    "checkout_mode": "guest",
+    "guest": {
+        "last_name": "Chan",
+        "first_name": "Tai Man",
+        "email": "chan@example.com",
+        "phone": "51234567",
+        "address_street": "中環金融街 8 號",
+        "address_building": "國際金融中心一期 15 樓 1501 室",
+        "card_number": "4111111111111111",
+        "card_month": "12",
+        "card_year": "2028",
+        "cvv": "123",
+    },
 }
 
 SAMPLE_GUEST = {
@@ -99,10 +113,12 @@ SAMPLE_GUEST = {
 }
 
 
-def test_apple_id_mode_requires_session_dir(client) -> None:
-    payload = {**SAMPLE_WORKER, "session_dir": ""}
+def test_empty_session_dir_is_auto_assigned(client) -> None:
+    payload = {**SAMPLE_WORKER, "id": "auto1", "session_dir": ""}
     response = client.post("/api/start", json={"test_mode": True, "workers": [payload]})
-    assert response.status_code == 422
+    assert response.status_code == 200, response.text
+    assert response.json()["workers"][0]["session_dir"].startswith("session_guest_")
+    client.post("/api/stop")
 
 
 def test_guest_profile_lists_every_empty_field() -> None:
@@ -345,12 +361,6 @@ def test_guest_can_resave_with_masked_card_and_blank_cvv(client) -> None:
 
 
 def test_guest_can_start_without_apple_id_login(client) -> None:
-    denied = client.post(
-        "/api/start",
-        json={"test_mode": True, "workers": [SAMPLE_WORKER]},
-    )
-    assert denied.status_code == 409
-
     started = client.post("/api/start", json={"test_mode": True, "workers": [SAMPLE_GUEST]})
     assert started.status_code == 200, started.text
     body = next(item for item in started.json()["workers"] if item["id"] == "g1")
@@ -1256,6 +1266,59 @@ async def test_bag_quantity_selects_two() -> None:
     assert page.selected == "2"
 
 
+class _FakeBagPage:
+    def __init__(self, items: int) -> None:
+        self.url = "https://www.apple.com/hk-zh/shop/bag"
+        self.items = items
+        self.removed = 0
+
+    def get_by_role(self, _role, name=None, **_kwargs):
+        return _FakeBagHandle(self, name)
+
+    def get_by_text(self, pattern, **_kwargs):
+        return _FakeBagHandle(self, pattern)
+
+    def locator(self, selector: str):
+        return _FakeBagHandle(self, selector)
+
+    async def goto(self, url, **_kwargs) -> None:
+        self.url = url
+
+    async def wait_for_url(self, *_args, **_kwargs) -> None:
+        return None
+
+
+class _FakeBagHandle:
+    def __init__(self, page: _FakeBagPage, name) -> None:
+        self._page = page
+        self._name = str(getattr(name, "pattern", name) or "")
+        self.first = self
+
+    def _is_remove(self) -> bool:
+        return bool(re.search(r"移除|Remove|remove", self._name, re.I))
+
+    async def wait_for(self, **_kwargs) -> None:
+        if self._page.items <= 0 or not self._is_remove():
+            raise TimeoutError("no remove")
+
+    async def click(self, **_kwargs) -> None:
+        if self._page.items <= 0:
+            raise TimeoutError("empty")
+        self._page.items -= 1
+        self._page.removed += 1
+
+    async def count(self) -> int:
+        return 1 if self._page.items and self._is_remove() else 0
+
+
+@pytest.mark.asyncio
+async def test_empty_bag_removes_leftover_items() -> None:
+    page = _FakeBagPage(2)
+    assert await _empty_bag(page) == 2
+    assert page.items == 0
+    assert page.removed == 2
+
+
 class _FakeHandle:
     def __init__(self, page: "_FakeProductPage", kind: str) -> None:
         self._page = page
@@ -1366,10 +1429,8 @@ def test_performance_report_includes_total_when_stopped_at_card() -> None:
 def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     js = Path("static/js/app.js").read_text()
     page = Path("templates/index.html").read_text()
-    assert "結帳模式 (Checkout Mode)" in js
-    assert "訪客 (Guest) 模式" in js
-    assert "門市自取 (Store Pickup)" in js
-    assert "送貨上門 (Home Delivery)" in js
+    assert "訪客 · 門市自取" in js
+    assert "訪客 · 送貨上門" in js
     assert "guest-cvv" in js
     assert "delivery-days" in js
     assert "訪客模式請填妥" in js
@@ -1402,10 +1463,21 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "maxlength=\"19\"" in js
     assert "slice(0, 16)" in js
     assert "paused" in js
-    assert "揀結帳模式" in page
+    assert "唔使登入 Apple ID" in page
+    assert "撳「登入 Apple ID」" not in js
+    assert '<select class="checkout-mode">' not in js
+    assert "結帳模式" not in js
+    assert 'class="login"' not in js
     readme = Path("README.md").read_text()
-    assert "組合 A：Apple ID + 門市自取" in readme
-    assert "組合 D：訪客 + 送貨上門" in readme
+    assert "組合 A：訪客 + 門市自取" in readme
+    assert "組合 B：訪客 + 送貨上門" in readme
+    assert "初次點樣登入 Apple ID" not in readme
+    assert "唔開瀏覽器會唔會快啲" in readme
+    assert "有頭（headed）本機 Chrome" in readme
+    assert "唔好用無痕視窗" in readme
+    assert "唔使自己開無痕" in readme
+    assert "唔會撳立即下單" in readme
+    assert "已清走購物袋" in Path("bot/checkout.py").read_text()
     assert "User Journey" in readme or "你點用" in readme
     assert "不換購" in readme
     assert "無 AppleCare+" in readme

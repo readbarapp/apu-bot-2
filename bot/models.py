@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from bot.catalogs import STORE_BY_ID
 
 PickupWindow = Literal["1d", "2d", "3d"]
-CheckoutMode = Literal["apple_id", "guest"]
+CheckoutMode = Literal["guest"]
 Fulfillment = Literal["pickup", "delivery"]
 WorkerStatus = Literal[
     "idle",
@@ -102,10 +102,15 @@ class WorkerProfile(BaseModel):
     stores: list[str] = Field(default_factory=list)
     pickup_window: PickupWindow = "1d"
     max_qty: int = Field(ge=1, le=99)
-    checkout_mode: CheckoutMode = "apple_id"
+    checkout_mode: CheckoutMode = "guest"
     fulfillment: Fulfillment = "pickup"
     delivery_max_days: int = Field(default=7, ge=1, le=30)
     guest: GuestProfile = Field(default_factory=GuestProfile)
+
+    @field_validator("checkout_mode", mode="before")
+    @classmethod
+    def guest_only(cls, value: object) -> str:
+        return "guest"
 
     @field_validator("name", "sku", "session_dir")
     @classmethod
@@ -130,22 +135,18 @@ class WorkerProfile(BaseModel):
 
     @model_validator(mode="after")
     def validate_modes(self) -> "WorkerProfile":
-        if self.checkout_mode == "apple_id":
-            if not self.session_dir:
-                raise ValueError("Apple ID 模式必須指定 Session 資料夾路徑")
-        else:
-            if not self.session_dir:
-                self.session_dir = f"session_guest_{self.id}"
-            missing = []
-            for key, label in GUEST_FIELD_LABELS.items():
-                value = getattr(self.guest, key) or ""
-                if key in {"card_number", "cvv"}:
-                    # Blank or masked PAN/CVV is filled from local secrets in manager._hydrate.
-                    continue
-                if not value:
-                    missing.append(label)
-            if missing:
-                raise ValueError(f"訪客模式請填妥：{'、'.join(missing)}")
+        if not self.session_dir:
+            self.session_dir = f"session_guest_{self.id}"
+        missing = []
+        for key, label in GUEST_FIELD_LABELS.items():
+            value = getattr(self.guest, key) or ""
+            if key in {"card_number", "cvv"}:
+                # Blank or masked PAN/CVV is filled from local secrets in manager._hydrate.
+                continue
+            if not value:
+                missing.append(label)
+        if missing:
+            raise ValueError(f"訪客模式請填妥：{'、'.join(missing)}")
         if self.fulfillment == "pickup" and not self.stores:
             raise ValueError("門市自取必須至少揀一間香港 Apple Store")
         return self
@@ -167,7 +168,7 @@ class StartRequest(BaseModel):
         if len(set(ids)) != len(ids):
             raise ValueError("worker id must be unique")
         if len(set(sessions)) != len(sessions):
-            raise ValueError("each worker needs its own Apple ID session folder")
+            raise ValueError("each worker needs its own session folder")
         return self
 
 
@@ -179,7 +180,7 @@ class WorkerPublicState(BaseModel):
     stores: list[str]
     pickup_window: PickupWindow
     max_qty: int
-    checkout_mode: CheckoutMode = "apple_id"
+    checkout_mode: CheckoutMode = "guest"
     fulfillment: Fulfillment = "pickup"
     delivery_max_days: int = 7
     purchased: int = 0
