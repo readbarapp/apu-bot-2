@@ -179,6 +179,59 @@ http://127.0.0.1:8765
 
 ---
 
+## 我更新咗程式之後你要點做
+
+**唔使重新裝 Python、唔使重新裝 Google Chrome、唔使重新建立 `.venv`、唔使重新填訪客資料。**
+
+一定要做嘅只有三樣：**停舊程式 → 用新檔取代舊 code → 再開 `py app.py`**。PowerShell 如果仲行緊舊嘅 `py app.py`，控制台睇落好似開住，但其實仲係舊程式。
+
+### 1. 停而家行緊嗰個
+
+1. 控制台撳紅色 **緊急停止所有 Bot**（有開住嘅 Apple 視窗就會關）。  
+2. 返去 PowerShell，撳 **Control + C**，等到唔再出新字。  
+   **意思：** 先關瀏覽器，再停後台。唔好喺舊程式仲行緊嗰陣覆蓋檔案。
+
+### 2. 換新程式（保留你嘅資料）
+
+之後每次我開咗 PR、你 merge 咗，GitHub 專案頁就係新版。你仍然用 **Code → Download ZIP**，唔使識 git。
+
+1. 下載 ZIP，解壓縮到一個**臨時**資料夾（例如桌面）。入面要見到新嘅 `app.py`、`bot` 資料夾。  
+2. 打開呢個新資料夾，**複製**呢啲（成個資料夾一齊複製）：
+
+   - `app.py`
+   - `bot`
+   - `templates`
+   - `static`
+   - `requirements.txt`
+   - `README.md`
+   - `preview.html`（有就一齊）
+
+3. 貼入你**平時用緊**嗰個舊專案資料夾（就係你 `cd` 入去跑 `py app.py` 嗰個），Windows 問「取代」就揀取代。  
+   **意思：** 只換程式碼。**唔好刪、唔好覆蓋**呢幾個：`.venv`、`sessions`、`secrets`、`.env`。  
+   - `.venv` = 上次已裝好嘅套件，留住就唔使再 `pip install`。  
+   - `secrets` 同 `.env` = 訪客卡號／CVV／地址，留住就唔使重新填。  
+   - `sessions` = Apple 網站 cookie／登入；一般留住。想乾淨測試先至睇下面「舊 cookie」。
+
+### 3. 再開控制台
+
+1. PowerShell `cd` 入**舊嗰個**專案資料夾（路徑同平時一樣）。  
+2. `.\.venv\Scripts\Activate.ps1`（見到 `(.venv)`）。  
+3. `py app.py`（或 `python app.py`）。  
+4. 瀏覽器打開 `http://127.0.0.1:8765`，撳 **F5 重新整理**。  
+   **意思：** Worker 卡係瀏覽器記住嘅，唔會因為換 code 而消失。F5 先會載入新按鈕／新說明。
+
+### 4. 幾時先要再 `pip install`？
+
+**多數更新都唔使。** 只有我話 `requirements.txt` 有改，或者你一跑 `py app.py` 見到 `No module named ...`，先喺已 `Activate.ps1` 嘅視窗跑：
+
+```powershell
+pip install -r requirements.txt
+```
+
+呢次「以訪客身份繼續」嗰個更新**唔使**再 pip、**唔使**再 `playwright install`。
+
+---
+
 ## 控制台點用
 
 1. 預設 **測試模式 (Test Mode / Dry Run)** 為開啟。建議先維持開啟。
@@ -312,6 +365,20 @@ Playwright 就算喺家用網絡，都可能帶自動化痕跡。按呢個次序
 2. 「輸入 Apple 產品 SKU」填例如 `MHRV4ZA/A`，產品名稱可寫 `iPhone 17e 256GB 黑色`，撳 **加入此 SKU**。
 3. **儲存此 Worker** → **登入 Apple ID**。Live Log 要見到「已用本機 Google Chrome」。
 4. 撳 **開始運作**，等 Live Log 出現效能實測報告。測試模式停在付款前，**唔扣款**。
+
+### 更新完程式，洗唔洗清 cookie 先再測 iPhone 17e？
+
+**唔使每次更新都清。** Worker 卡、訪客姓名／地址／信用卡唔喺 cookie，換 code 之後唔使重新開卡、唔使重新填。
+
+會受舊 cookie 影響嘅，係 Bot 彈出嚟嗰個 Apple 視窗：購物袋仲有上次嘅貨、停喺安全結帳、或者上次半完成嘅結帳。
+
+- **一般更新：** 緊急停止 → 換檔 → 再開 `py app.py` → F5 → 直接開始運作就得。Apple ID 模式仲會記得登入。  
+- **想乾淨測訪客 + iPhone 17e（例如上次停喺「以訪客身份繼續」）：**  
+  1. 緊急停止，PowerShell Control + C。  
+  2. 喺檔案總管打開專案入面嘅 `sessions\`，**只刪嗰張訪客卡寫住嘅資料夾**（例如 `session_guest_1`）。**唔好刪** Apple ID 嗰啲 `session_worker_...`，否則要重新 2FA。  
+  3. 再開 `py app.py`，F5，同一張訪客卡、同一個 17e SKU，測試模式開住，撳開始運作。
+
+刪咗嗰個 session 之後，Bot 會當全新瀏覽器：空購物袋，重新加車，再去登入牆撳「以訪客身份繼續」。數量上限「已買 1/1」係呢一次 `py app.py` 先記住；你 Control + C 再開過，計數會歸零。
 
 ### 測試成功之後，可唔可以揀返 Duo？
 

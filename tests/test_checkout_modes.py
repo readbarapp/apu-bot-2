@@ -820,6 +820,9 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "我希望送貨" in readme
     assert "Shipping-init" in readme
     assert "訪客模式搶購流程" in readme
+    assert "我更新咗程式之後你要點做" in readme
+    assert "唔使重新裝 Python" in readme
+    assert "更新完程式，洗唔洗清 cookie" in readme
     assert "PickupContact-init" in readme
     assert "Billing-init" in readme
     assert "step=attach" in readme
