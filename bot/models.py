@@ -125,7 +125,22 @@ class WorkerProfile(BaseModel):
         else:
             if not self.session_dir:
                 self.session_dir = f"session_guest_{self.id}"
-            missing = self.guest.missing_labels()
+            card = self.guest.card_number or ""
+            masked_card = "•" in card
+            missing = []
+            for key, label in GUEST_FIELD_LABELS.items():
+                value = getattr(self.guest, key) or ""
+                if key == "card_number":
+                    if not value:
+                        missing.append(label)
+                    continue
+                if key == "cvv":
+                    # Blank CVV is OK when the PAN is masked; hydrate fills it from secrets.
+                    if not value and not masked_card:
+                        missing.append(label)
+                    continue
+                if not value:
+                    missing.append(label)
             if missing:
                 raise ValueError(f"訪客模式請填妥：{'、'.join(missing)}")
         if self.fulfillment == "pickup" and not self.stores:
