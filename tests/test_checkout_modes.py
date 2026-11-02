@@ -32,6 +32,7 @@ from bot.checkout import (
     checkout_stage,
     mm_yy,
     wait_if_checkout_blocked,
+    _response_looks_blocked,
 )
 from bot.models import GuestProfile
 from bot.inventory import days_from_quote
@@ -492,6 +493,24 @@ def test_product_option_patterns_match_current_apple_hk_labels() -> None:
     assert DELIVERY_PATTERN.search("我希望送貨")
     assert not PICKUP_PATTERN.search("取貨分店")
     assert not DELIVERY_PATTERN.search("送貨地址")
+
+
+class _FakeResponse:
+    def __init__(self, url: str, status: int) -> None:
+        self.url = url
+        self.status = status
+
+
+def test_add_to_cart_541_is_treated_as_blocked() -> None:
+    assert _response_looks_blocked(
+        _FakeResponse(
+            "https://www.apple.com/hk-zh/shop/buy-iphone/iphone-17e?product=MHRV4ZA/A&add-to-cart=add-to-cart",
+            541,
+        )
+    )
+    assert not _response_looks_blocked(
+        _FakeResponse("https://www.apple.com/hk-zh/shop/bag", 200)
+    )
 
 
 def test_checkout_stage_follows_iphone_guest_pickup_urls() -> None:
