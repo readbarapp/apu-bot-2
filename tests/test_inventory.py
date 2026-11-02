@@ -193,3 +193,5 @@ def test_worker_polls_inventory_inside_the_browser() -> None:
     assert "page.request" not in text
     assert "_open_product_watch_page" in text
     assert "InventoryLimited" in text
+    assert "WATCH_HEARTBEAT_POLLS" in text
+    assert "正在查貨" in text

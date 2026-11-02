@@ -1161,6 +1161,19 @@ def test_performance_report_lists_four_steps() -> None:
     assert INTERRUPT_MESSAGE.startswith("⚠️")
 
 
+def test_performance_report_includes_total_when_stopped_at_card() -> None:
+    result = CheckoutResult(
+        ok=True,
+        reason="dry_run",
+        timings={"add_bag": 1.1, "enter_checkout": 0.9, "fulfillment": 3.2, "billing": 2.4},
+        total_seconds=8.25,
+    )
+    report = result.report()
+    assert "到達信用卡頁" in report
+    assert "總耗時 8.25 秒" in report
+    assert "Step 4 到達付款前最後一步" not in report
+
+
 def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     js = Path("static/js/app.js").read_text()
     page = Path("templates/index.html").read_text()
