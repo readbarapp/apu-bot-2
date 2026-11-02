@@ -50,10 +50,67 @@ FIELD_CANDIDATES = {
     "phone": [r"電話號碼", r"電話", r"手機", r"Phone", r"Mobile", r"fullDaytimePhone"],
     "address": [r"街道地址", r"地址", r"街道", r"Address", r"Street"],
     "card_number": [r"卡號", r"信用卡", r"Card Number", r"cardNumber"],
-    "card_month": [r"月", r"Month", r"expMonth"],
-    "card_year": [r"年", r"Year", r"expYear"],
+    "card_month": [r"月", r"Month", r"expMonth", r"expireMonth"],
+    "card_year": [r"年", r"Year", r"expYear", r"expireYear"],
     "cvv": [r"安全碼", r"CVV", r"CVC", r"Security Code"],
 }
+COMBINED_EXPIRY_PATTERNS = [
+    r"MM\s*/\s*YY",
+    r"月\s*[／/]\s*年",
+    r"到期日",
+    r"有效期限",
+    r"Expiry Date",
+    r"Expiration Date",
+    r"expirationDate",
+]
+
+
+def card_year_yy(year: str) -> str:
+    digits = re.sub(r"\D", "", year or "")
+    if len(digits) >= 2:
+        return digits[-2:]
+    return digits
+
+
+def card_year_yyyy(year: str) -> str:
+    digits = re.sub(r"\D", "", year or "")
+    if len(digits) == 2:
+        return f"20{digits}"
+    if len(digits) >= 4:
+        return digits[-4:]
+    return digits
+
+
+def card_year_options(year: str) -> list[str]:
+    """Apple HK expiry is MM/YY. Try 2-digit YY first, then 4-digit as a select fallback."""
+    yy = card_year_yy(year)
+    yyyy = card_year_yyyy(year)
+    options: list[str] = []
+    if yy:
+        options.append(yy)
+    if yyyy and yyyy not in options:
+        options.append(yyyy)
+    return options
+
+
+def card_month_options(month: str) -> list[str]:
+    digits = re.sub(r"\D", "", month or "")
+    if not digits:
+        return []
+    number = int(digits)
+    if number < 1 or number > 12:
+        return [digits]
+    padded = f"{number:02d}"
+    plain = str(number)
+    return [padded] if padded == plain else [padded, plain]
+
+
+def mm_yy(month: str, year: str) -> str:
+    months = card_month_options(month)
+    yy = card_year_yy(year)
+    if not months or not yy:
+        return ""
+    return f"{months[0]}/{yy}"
 
 
 class CheckoutInterrupted(Exception):
@@ -324,8 +381,49 @@ async def _on_place_order_step(page) -> bool:
         return False
 
 
-async def _fill_labeled(page, patterns: list[str], value: str) -> bool:
-    if not value:
+def _fill_values(value: str | list[str]) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value else []
+    return [item for item in value if item]
+
+
+async def _choose_input_value(handle, values: list[str]) -> str:
+    chosen = values[0]
+    try:
+        maxlength = str(await handle.get_attribute("maxlength") or "")
+    except Exception:
+        maxlength = ""
+    if maxlength == "4":
+        four = next((item for item in values if len(re.sub(r"\D", "", item)) == 4), None)
+        if four:
+            return four
+    slash = next((item for item in values if "/" in item), None)
+    if slash and maxlength in {"5", "7"}:
+        return slash
+    return chosen
+
+
+async def _apply_fill(handle, values: list[str]) -> bool:
+    tag = await handle.evaluate("el => (el.tagName || '').toLowerCase()")
+    if tag == "select":
+        for candidate in values:
+            try:
+                await handle.select_option(value=candidate, timeout=1500)
+                return True
+            except Exception:
+                try:
+                    await handle.select_option(label=candidate, timeout=1500)
+                    return True
+                except Exception:
+                    continue
+        return False
+    await handle.fill(await _choose_input_value(handle, values), timeout=2000)
+    return True
+
+
+async def _fill_labeled(page, patterns: list[str], value: str | list[str]) -> bool:
+    values = _fill_values(value)
+    if not values:
         return False
     joined = re.compile("|".join(patterns), re.I)
     locators = [
@@ -337,18 +435,38 @@ async def _fill_labeled(page, patterns: list[str], value: str) -> bool:
         try:
             handle = locator.first
             await handle.wait_for(state="visible", timeout=1800)
-            tag = await handle.evaluate("el => (el.tagName || '').toLowerCase()")
-            if tag == "select":
-                try:
-                    await handle.select_option(value=value, timeout=1500)
-                except Exception:
-                    await handle.select_option(label=value, timeout=1500)
-            else:
-                await handle.fill(value, timeout=2000)
-            return True
+            if await _apply_fill(handle, values):
+                return True
         except Exception:
             continue
     return False
+
+
+async def _fill_combined_expiry(page, combined: str) -> bool:
+    locators = [
+        page.locator("input[autocomplete='cc-exp']"),
+        page.locator("input[placeholder*='MM' i][placeholder*='YY' i]"),
+        page.locator(
+            "input[name*='expiration' i]:not([name*='month' i]):not([name*='year' i])"
+        ),
+    ]
+    for locator in locators:
+        try:
+            handle = locator.first
+            await handle.wait_for(state="visible", timeout=1200)
+            await handle.fill(combined, timeout=2000)
+            return True
+        except Exception:
+            continue
+    return await _fill_labeled(page, COMBINED_EXPIRY_PATTERNS, combined)
+
+
+async def _fill_card_expiry(page, month: str, year: str) -> None:
+    combined = mm_yy(month, year)
+    if combined and await _fill_combined_expiry(page, combined):
+        return
+    await _fill_labeled(page, FIELD_CANDIDATES["card_month"], card_month_options(month))
+    await _fill_labeled(page, FIELD_CANDIDATES["card_year"], card_year_options(year))
 
 
 async def _fill_guest(page, guest: GuestProfile | None) -> None:
@@ -361,12 +479,11 @@ async def _fill_guest(page, guest: GuestProfile | None) -> None:
         "phone": guest.phone,
         "address": guest.address,
         "card_number": guest.card_number,
-        "card_month": guest.card_month,
-        "card_year": guest.card_year,
         "cvv": guest.cvv,
     }
     for key, value in mapping.items():
         await _fill_labeled(page, FIELD_CANDIDATES[key], value)
+    await _fill_card_expiry(page, guest.card_month, guest.card_year)
 
 
 async def _select_pickup_store(page, match: StockMatch, timeout: int) -> None:

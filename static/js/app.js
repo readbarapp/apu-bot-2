@@ -604,9 +604,10 @@
   function yearOptions(selected) {
     const year = new Date().getFullYear();
     const years = Array.from({ length: 12 }, (_, index) => String(year + index));
-    return [`<option value="">請選擇</option>`].concat(years.map((value) => (
-      `<option value="${esc(value)}" ${String(selected) === value ? "selected" : ""}>${esc(value)}</option>`
-    ))).join("");
+    return [`<option value="">請選擇</option>`].concat(years.map((value) => {
+      const yy = value.slice(-2);
+      return `<option value="${esc(value)}" ${String(selected) === value ? "selected" : ""}>${esc(value)}（${esc(yy)}）</option>`;
+    })).join("");
   }
 
   function monthOptions(selected) {
@@ -695,7 +696,7 @@
               <label class="field"><span>有效年份</span><select class="guest-year">${yearOptions(guest.card_year)}</select></label>
               <label class="field"><span>CVV 安全碼</span><input class="guest-cvv" type="password" maxlength="4" autocomplete="off" value="${esc(guest.cvv)}" /></label>
             </div>
-            <p class="help">第一次要填晒全部欄位先可以儲存。儲存後可以再改再存：卡號會變成 •••• 後四位，改姓名／地址唔使再填 CVV。要換卡先至要填新嘅 16 位卡號同 CVV。卡號同 CVV 只會加密寫入本機 secrets 資料夾。</p>
+            <p class="help">第一次要填晒全部欄位先可以儲存。儲存後可以再改再存：卡號會變成 •••• 後四位，改姓名／地址唔使再填 CVV。要換卡先至要填新嘅 16 位卡號同 CVV。控制台年份顯示 2028，填入 Apple 官網時會轉成 MM/YY（例如 12/28），唔會填 12/2028。卡號同 CVV 只會加密寫入本機 secrets 資料夾。</p>
           </div>
           <div class="field full sku-block">
             <span>1. 目標機型（每個 Worker 只搶一個 SKU）</span>
@@ -941,6 +942,7 @@
       return false;
     }
     const secretPayload = isGuestMode(worker) && !state.previewMode ? apiProfile(worker) : null;
+    const guestResave = isGuestMode(worker) && Boolean(savedProfile(worker.id));
     const profile = profileOf(worker);
     const index = state.savedWorkers.findIndex((item) => item.id === worker.id);
     if (index >= 0) state.savedWorkers[index] = profile;
@@ -973,7 +975,7 @@
       ts: new Date().toISOString(),
       worker: worker.name,
       level: "success",
-      message: "已儲存此 Worker 設定。",
+      message: guestResave ? `${worker.name} 訪客資料已修改成功` : "已儲存此 Worker 設定。",
     });
     return true;
   }
