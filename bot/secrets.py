@@ -79,7 +79,9 @@ def public_guest(guest: dict) -> dict:
         "first_name": guest.get("first_name") or "",
         "email": guest.get("email") or "",
         "phone": guest.get("phone") or "",
-        "address": guest.get("address") or "",
+        "address": guest.get("address_street") or guest.get("address") or "",
+        "address_street": guest.get("address_street") or guest.get("address") or "",
+        "address_building": guest.get("address_building") or "",
         "card_number": f"•••• {digits[-4:]}" if len(digits) >= 4 else "",
         "card_month": guest.get("card_month") or "",
         "card_year": guest.get("card_year") or "",
@@ -94,7 +96,9 @@ def save_guest_secrets(worker_id: str, guest: dict) -> None:
         "first_name": guest.get("first_name") or "",
         "email": guest.get("email") or "",
         "phone": guest.get("phone") or "",
-        "address": guest.get("address") or "",
+        "address": guest.get("address_street") or guest.get("address") or "",
+        "address_street": guest.get("address_street") or guest.get("address") or "",
+        "address_building": guest.get("address_building") or "",
         "card_number": re.sub(r"\D", "", str(guest.get("card_number") or "")),
         "card_month": guest.get("card_month") or "",
         "card_year": guest.get("card_year") or "",
@@ -126,6 +130,10 @@ def merge_guest_payload(worker_id: str, incoming: dict) -> dict:
             continue
         if text:
             merged[key] = text
+    if not merged.get("address_street") and merged.get("address"):
+        merged["address_street"] = merged["address"]
+    if not merged.get("address") and merged.get("address_street"):
+        merged["address"] = merged["address_street"]
     if merged.get("card_number") and merged.get("cvv"):
         save_guest_secrets(worker_id, merged)
     return merged

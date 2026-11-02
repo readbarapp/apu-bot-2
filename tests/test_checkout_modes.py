@@ -6,17 +6,29 @@ import pytest
 
 from bot.checkout import (
     ADD_BAG_PATTERN,
+    CHECKOUT_PATTERN,
+    CONTINUE_PATTERN,
+    CREDIT_CARD_PATTERN,
     CheckoutResult,
     GUEST_PATTERN,
     INTERRUPT_MESSAGE,
     NO_APPLECARE_PATTERN,
     NO_TRADEIN_PATTERN,
+    REVIEW_ORDER_PATTERN,
     SKIP_PATTERN,
+    VIEW_BAG_PATTERN,
     _click_add_to_bag,
     _continue_as_guest,
     _decline_tradein_and_applecare,
+    _fill_card_expiry,
+    _fill_guest,
+    _set_bag_quantity,
     block_report,
+    card_month_options,
+    card_year_options,
     checkout_is_blocked,
+    checkout_stage,
+    mm_yy,
     wait_if_checkout_blocked,
 )
 from bot.models import GuestProfile
@@ -49,7 +61,9 @@ SAMPLE_GUEST = {
         "first_name": "Tai Man",
         "email": "chan@example.com",
         "phone": "51234567",
-        "address": "1 IFC, Central, Hong Kong",
+        "address": "中環金融街 8 號",
+        "address_street": "中環金融街 8 號",
+        "address_building": "國際金融中心一期 15 樓 1501 室",
         "card_number": "4111111111111111",
         "card_month": "12",
         "card_year": "2028",
@@ -71,7 +85,167 @@ def test_guest_profile_lists_every_empty_field() -> None:
     assert "信用卡號碼" in missing
     assert "有效月份" in missing
     assert "CVV 安全碼" in missing
+    assert "街道地址" in "".join(missing)
+    assert "屋苑或大廈" in "".join(missing)
     assert "英文姓氏" not in missing
+
+
+def test_legacy_address_copies_into_street_line() -> None:
+    guest = GuestProfile(
+        last_name="Chan",
+        first_name="Tai Man",
+        email="chan@example.com",
+        phone="51234567",
+        address="中環金融街 8 號",
+        card_number="4111111111111111",
+        card_month="12",
+        card_year="2028",
+        cvv="123",
+    )
+    assert guest.address_street == "中環金融街 8 號"
+    assert "屋苑或大廈" in "".join(guest.missing_labels())
+
+
+def test_card_expiry_prefers_two_digit_year_for_apple_mm_yy() -> None:
+    assert card_year_options("2028") == ["28", "2028"]
+    assert card_year_options("28") == ["28", "2028"]
+    assert card_month_options("12") == ["12"]
+    assert card_month_options("1") == ["01", "1"]
+    assert mm_yy("12", "2028") == "12/28"
+    assert mm_yy("09", "2031") == "09/31"
+    assert mm_yy("1", "28") == "01/28"
+    assert "2028" not in mm_yy("12", "2028")
+    assert mm_yy("", "2028") == ""
+
+
+class _FakeExpiryHandle:
+    def __init__(self, page: "_FakeExpiryPage", kind: str, tag: str = "input") -> None:
+        self._page = page
+        self._kind = kind
+        self._tag = tag
+        self.first = self
+
+    async def wait_for(self, **_kwargs) -> None:
+        if self._kind not in self._page.fields:
+            raise RuntimeError("missing")
+
+    async def count(self) -> int:
+        return 1 if self._kind in self._page.fields else 0
+
+    async def click(self, **_kwargs) -> None:
+        return None
+
+    async def evaluate(self, _script: str) -> str:
+        return self._tag
+
+    async def get_attribute(self, name: str) -> str | None:
+        field = self._page.fields.get(self._kind) or {}
+        return field.get(name)
+
+    async def select_option(self, value=None, label=None, **_kwargs) -> None:
+        candidate = value or label
+        options = (self._page.fields.get(self._kind) or {}).get("options") or []
+        if candidate not in options:
+            raise RuntimeError("no option")
+        self._page.filled[self._kind] = candidate
+
+    async def fill(self, value: str, **_kwargs) -> None:
+        self._page.filled[self._kind] = value
+
+
+class _FakeExpiryPage:
+    def __init__(self, fields: dict[str, dict]) -> None:
+        self.fields = fields
+        self.filled: dict[str, str] = {}
+
+    def _match(self, text: str) -> _FakeExpiryHandle | None:
+        lowered = text.lower()
+        if "mm" in lowered and "yy" in lowered and "combined" in self.fields:
+            return _FakeExpiryHandle(self, "combined")
+        if "expiration" in lowered and "month" not in lowered and "year" not in lowered and "combined" in self.fields:
+            return _FakeExpiryHandle(self, "combined")
+        if "expmonth" in lowered or ("月" in text and "年" not in text):
+            tag = (self.fields.get("month") or {}).get("tag", "select")
+            return _FakeExpiryHandle(self, "month", tag)
+        if "expyear" in lowered or ("年" in text and "月" not in text):
+            tag = (self.fields.get("year") or {}).get("tag", "select")
+            return _FakeExpiryHandle(self, "year", tag)
+        return None
+
+    def get_by_label(self, pattern):
+        handle = self._match(pattern.pattern if hasattr(pattern, "pattern") else str(pattern))
+        return handle or _FakeExpiryHandle(self, "missing")
+
+    def get_by_placeholder(self, pattern):
+        return self.get_by_label(pattern)
+
+    def get_by_role(self, _role, name=None):
+        return self.get_by_label(name or _role)
+
+    def get_by_text(self, pattern):
+        return self.get_by_label(pattern)
+
+    def locator(self, selector: str):
+        handle = self._match(selector)
+        return handle or _FakeExpiryHandle(self, "missing")
+
+
+@pytest.mark.asyncio
+async def test_fill_card_expiry_uses_mm_yy_not_four_digit_year() -> None:
+    page = _FakeExpiryPage({"combined": {"tag": "input", "maxlength": "5"}})
+    await _fill_card_expiry(page, "12", "2028")
+    assert page.filled == {"combined": "12/28"}
+    assert "2028" not in page.filled["combined"]
+
+
+@pytest.mark.asyncio
+async def test_fill_card_expiry_year_select_prefers_two_digit_option() -> None:
+    page = _FakeExpiryPage({
+        "month": {"tag": "select", "options": ["12"]},
+        "year": {"tag": "select", "options": ["28", "2028"]},
+    })
+    await _fill_card_expiry(page, "12", "2028")
+    assert page.filled["year"] == "28"
+
+
+@pytest.mark.asyncio
+async def test_fill_card_expiry_year_select_tries_yy_then_yyyy() -> None:
+    page = _FakeExpiryPage({
+        "month": {"tag": "select", "options": ["12"]},
+        "year": {"tag": "select", "options": ["2028"]},
+    })
+    await _fill_card_expiry(page, "12", "2028")
+    assert page.filled["month"] == "12"
+    assert page.filled["year"] == "2028"
+
+
+@pytest.mark.asyncio
+async def test_fill_card_expiry_year_input_uses_two_digits() -> None:
+    page = _FakeExpiryPage({
+        "month": {"tag": "select", "options": ["12"]},
+        "year": {"tag": "input", "maxlength": "2"},
+    })
+    await _fill_card_expiry(page, "12", "2028")
+    assert page.filled["year"] == "28"
+
+
+@pytest.mark.asyncio
+async def test_fill_guest_does_not_type_four_digit_year_into_mm_yy() -> None:
+    page = _FakeExpiryPage({"combined": {"tag": "input", "placeholder": "MM/YY"}})
+    guest = GuestProfile(
+        last_name="Chan",
+        first_name="Tai Man",
+        email="chan@example.com",
+        phone="51234567",
+        address_street="中環金融街 8 號",
+        address_building="國際金融中心一期 15 樓 1501 室",
+        card_number="4111111111111111",
+        card_month="12",
+        card_year="2028",
+        cvv="123",
+    )
+    await _fill_guest(page, guest)
+    assert page.filled.get("combined") == "12/28"
 
 
 def test_guest_card_must_be_sixteen_digits(client) -> None:
@@ -306,6 +480,65 @@ def test_product_option_patterns_match_current_apple_hk_labels() -> None:
     assert ADD_BAG_PATTERN.search("加入購物袋")
     assert ADD_BAG_PATTERN.search("Add to Bag") is not None
     assert not ADD_BAG_PATTERN.search("使用 Apple Pay 結帳")
+    assert VIEW_BAG_PATTERN.search("查看購物袋")
+    assert CHECKOUT_PATTERN.search("結帳")
+    assert not CHECKOUT_PATTERN.search("使用 Apple Pay 結帳")
+    assert CONTINUE_PATTERN.search("繼續前往付款")
+    assert CREDIT_CARD_PATTERN.search("信用卡或扣帳卡")
+    assert REVIEW_ORDER_PATTERN.search("檢查你的訂單")
+
+
+def test_checkout_stage_follows_iphone_guest_pickup_urls() -> None:
+    assert checkout_stage(
+        "https://www.apple.com/hk-zh/shop/buy-iphone/iphone-17e?product=mhrv4za/a&step=attach"
+    ) == "attach"
+    assert checkout_stage("https://www.apple.com/hk-zh/shop/bag") == "bag"
+    assert checkout_stage(
+        "https://secure6.store.apple.com/hk-zh/shop/signIn?ssi=abc"
+    ) == "signin"
+    assert checkout_stage(
+        "https://secure6.store.apple.com/hk-zh/shop/checkout?_s=Fulfillment-init"
+    ) == "fulfillment"
+    assert checkout_stage(
+        "https://secure6.store.apple.com/hk-zh/shop/checkout?_s=PickupContact-init"
+    ) == "contact"
+    assert checkout_stage(
+        "https://secure6.store.apple.com/hk-zh/shop/checkout?_s=Billing-init"
+    ) == "billing"
+
+
+class _FakeQtyHandle:
+    def __init__(self, page: "_FakeQtyPage") -> None:
+        self._page = page
+        self.first = self
+
+    async def wait_for(self, **_kwargs) -> None:
+        return None
+
+    async def select_option(self, value=None, label=None, **_kwargs) -> None:
+        candidate = value or label
+        if candidate not in self._page.options:
+            raise RuntimeError("no option")
+        self._page.selected = candidate
+
+
+class _FakeQtyPage:
+    def __init__(self, options: list[str]) -> None:
+        self.options = options
+        self.selected = "1"
+
+    def locator(self, _selector: str) -> _FakeQtyHandle:
+        return _FakeQtyHandle(self)
+
+    def get_by_label(self, _pattern) -> _FakeQtyHandle:
+        return _FakeQtyHandle(self)
+
+
+@pytest.mark.asyncio
+async def test_bag_quantity_selects_two() -> None:
+    page = _FakeQtyPage(["1", "2"])
+    assert await _set_bag_quantity(page, 2) == 2
+    assert page.selected == "2"
 
 
 class _FakeHandle:
@@ -415,6 +648,14 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "填晒先可以儲存同開始運作" in js
     assert "可以再改再存" in js
     assert "guestHasMaskedCard" in js
+    assert "訪客資料已修改成功" in js
+    assert "guestResave" in js
+    assert "slice(-2)" in js
+    assert "唔會填 12/2028" in js
+    assert "MM/YY" in js
+    assert "guest-address-street" in js
+    assert "guest-address-building" in js
+    assert "屋苑或大廈" in js
     assert "請選擇" in js
     assert 'card_month: ""' in js
     assert "digits.length < 3" in js
@@ -439,3 +680,11 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "3.2–3.9 秒" in readme
     assert "【請複製呢段到對話】" in readme
     assert "平時用嘅 Chrome" in readme
+    assert "唔會填 12/2028" in readme
+    assert "訪客資料已修改成功" in readme
+    assert "MM/YY" in readme
+    assert "查看購物袋" in readme
+    assert "繼續前往付款" in readme
+    assert "信用卡或扣帳卡" in readme
+    assert "檢查你的訂單" in readme
+    assert "使用 Apple Pay 結帳" in readme

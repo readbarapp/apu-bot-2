@@ -12,6 +12,7 @@ from bot.models import GuestProfile
 
 PLACE_ORDER_PATTERN = re.compile(r"立即下單|下訂單|Place Your Order|Place Order", re.I)
 ADD_BAG_PATTERN = re.compile(r"加入購物袋|Add to Bag|Add to Cart", re.I)
+VIEW_BAG_PATTERN = re.compile(r"查看購物袋|View Bag|Review Bag", re.I)
 NO_TRADEIN_PATTERN = re.compile(
     r"^不換購$|不使用折抵|不使用 iPhone 折抵|No trade-?in",
     re.I,
@@ -20,14 +21,17 @@ NO_APPLECARE_PATTERN = re.compile(
     r"無 AppleCare|沒有 AppleCare|No AppleCare|Without AppleCare",
     re.I,
 )
-CHECKOUT_PATTERN = re.compile(r"^結帳$|^Check Out$|Checkout", re.I)
+CHECKOUT_PATTERN = re.compile(r"^(結帳|Check Out|Checkout)$", re.I)
+APPLE_PAY_PATTERN = re.compile(r"Apple\s*Pay", re.I)
 SKIP_PATTERN = re.compile(
     r"不換購|不使用折抵|不使用 iPhone 折抵|不，謝謝|暫時不加入|"
     r"無 AppleCare|沒有 AppleCare|No AppleCare|Without AppleCare|"
     r"No trade-in|Skip|略過此步驟|現在不要|不加入",
     re.I,
 )
-CONTINUE_PATTERN = re.compile(r"^繼續$|^Continue$|繼續結帳", re.I)
+CONTINUE_PATTERN = re.compile(r"繼續前往付款|繼續結帳|^繼續$|^Continue$|Continue to Payment", re.I)
+REVIEW_ORDER_PATTERN = re.compile(r"檢查你的訂單|Review Your Order|Review Order", re.I)
+CREDIT_CARD_PATTERN = re.compile(r"信用卡或扣帳卡|Credit or Debit Card|Credit Card", re.I)
 PICKUP_PATTERN = re.compile(r"我會前來取貨|於 Apple Store 取貨|店內取貨|門市取貨|Pick up|取貨", re.I)
 DELIVERY_PATTERN = re.compile(r"我希望送貨|送貨上門|運送|送貨|Delivery|Ship|Home Delivery", re.I)
 GUEST_PATTERN = re.compile(
@@ -48,12 +52,84 @@ FIELD_CANDIDATES = {
     "first_name": [r"名字", r"名(?!稱)", r"First Name", r"firstName", r"givenName"],
     "email": [r"電郵地址", r"電郵", r"電子郵件", r"Email", r"emailAddress"],
     "phone": [r"電話號碼", r"電話", r"手機", r"Phone", r"Mobile", r"fullDaytimePhone"],
-    "address": [r"街道地址", r"地址", r"街道", r"Address", r"Street"],
-    "card_number": [r"卡號", r"信用卡", r"Card Number", r"cardNumber"],
-    "card_month": [r"月", r"Month", r"expMonth"],
-    "card_year": [r"年", r"Year", r"expYear"],
+    "address_street": [
+        r"街道名稱及號碼",
+        r"街道地址",
+        r"Address Line 1",
+        r"street",
+        r"address1",
+    ],
+    "address_building": [
+        r"屋苑或大廈",
+        r"座數",
+        r"樓層",
+        r"單位",
+        r"Address Line 2",
+        r"address2",
+    ],
+    "country": [r"國家或地區", r"國家／地區", r"Country", r"countryCode"],
+    "card_number": [r"卡號", r"信用卡號碼", r"Card Number", r"cardNumber"],
+    "card_month": [r"月", r"Month", r"expMonth", r"expireMonth"],
+    "card_year": [r"年", r"Year", r"expYear", r"expireYear"],
     "cvv": [r"安全碼", r"CVV", r"CVC", r"Security Code"],
 }
+COMBINED_EXPIRY_PATTERNS = [
+    r"MM\s*/\s*YY",
+    r"月\s*[／/]\s*年",
+    r"到期日",
+    r"有效期限",
+    r"Expiry Date",
+    r"Expiration Date",
+    r"expirationDate",
+]
+
+
+def card_year_yy(year: str) -> str:
+    digits = re.sub(r"\D", "", year or "")
+    if len(digits) >= 2:
+        return digits[-2:]
+    return digits
+
+
+def card_year_yyyy(year: str) -> str:
+    digits = re.sub(r"\D", "", year or "")
+    if len(digits) == 2:
+        return f"20{digits}"
+    if len(digits) >= 4:
+        return digits[-4:]
+    return digits
+
+
+def card_year_options(year: str) -> list[str]:
+    """Apple HK expiry is MM/YY. Try 2-digit YY first, then 4-digit as a select fallback."""
+    yy = card_year_yy(year)
+    yyyy = card_year_yyyy(year)
+    options: list[str] = []
+    if yy:
+        options.append(yy)
+    if yyyy and yyyy not in options:
+        options.append(yyyy)
+    return options
+
+
+def card_month_options(month: str) -> list[str]:
+    digits = re.sub(r"\D", "", month or "")
+    if not digits:
+        return []
+    number = int(digits)
+    if number < 1 or number > 12:
+        return [digits]
+    padded = f"{number:02d}"
+    plain = str(number)
+    return [padded] if padded == plain else [padded, plain]
+
+
+def mm_yy(month: str, year: str) -> str:
+    months = card_month_options(month)
+    yy = card_year_yy(year)
+    if not months or not yy:
+        return ""
+    return f"{months[0]}/{yy}"
 
 
 class CheckoutInterrupted(Exception):
@@ -69,6 +145,7 @@ class CheckoutResult:
     pause: bool = False
     timings: dict[str, float] = field(default_factory=dict)
     total_seconds: float = 0.0
+    quantity: int = 1
 
     def report(self) -> str:
         labels = {
@@ -96,13 +173,20 @@ class StepTimer:
         self.marks[name] = round(now - self.last, 3)
         self.last = now
 
-    def result(self, ok: bool, reason: str, pause: bool = False) -> CheckoutResult:
+    def result(
+        self,
+        ok: bool,
+        reason: str,
+        pause: bool = False,
+        quantity: int = 1,
+    ) -> CheckoutResult:
         return CheckoutResult(
             ok=ok,
             reason=reason,
             pause=pause,
             timings=dict(self.marks),
             total_seconds=round(time.perf_counter() - self.started, 3),
+            quantity=max(1, int(quantity or 1)),
         )
 
 
@@ -113,6 +197,25 @@ async def _stopped(stop_event: asyncio.Event) -> bool:
 def checkout_is_blocked(url: str) -> bool:
     text = (url or "").lower()
     return any(marker in text for marker in BLOCKED_URL_MARKERS)
+
+
+def checkout_stage(url: str) -> str:
+    text = url or ""
+    if re.search(r"PickupContact|ShippingContact|Shipping-init", text, re.I):
+        return "contact"
+    if re.search(r"Billing", text, re.I):
+        return "billing"
+    if re.search(r"Fulfillment", text, re.I):
+        return "fulfillment"
+    if re.search(r"Review|placeorder|namedPlaceOrder", text, re.I):
+        return "review"
+    if re.search(r"signIn", text, re.I):
+        return "signin"
+    if re.search(r"/shop/bag", text, re.I):
+        return "bag"
+    if re.search(r"step=attach|/attach", text, re.I):
+        return "attach"
+    return "other"
 
 
 def block_report(step: str, url: str, title: str = "", extra: str = "") -> str:
@@ -140,7 +243,10 @@ async def wait_if_checkout_blocked(page, timeout: int = 8000) -> bool:
     """True when add-to-bag or checkout navigated to Apple's 541/404 page."""
     try:
         await page.wait_for_url(
-            re.compile(r"/shop/bag|/shop/404|/shop/go/404|/shop/541|sorry", re.I),
+            re.compile(
+                r"/shop/bag|step=attach|/shop/404|/shop/go/404|/shop/541|sorry",
+                re.I,
+            ),
             timeout=timeout,
         )
     except Exception:
@@ -223,10 +329,26 @@ async def _decline_tradein_and_applecare(page) -> None:
     await _click_choice(page, NO_APPLECARE_PATTERN, timeout=2500)
 
 
+async def _is_apple_pay_control(handle) -> bool:
+    try:
+        text = " ".join(
+            [
+                str(await handle.inner_text() or ""),
+                str(await handle.get_attribute("aria-label") or ""),
+                str(await handle.get_attribute("data-autom") or ""),
+                str(await handle.get_attribute("class") or ""),
+            ]
+        )
+    except Exception:
+        return False
+    return bool(APPLE_PAY_PATTERN.search(text))
+
+
 async def _click_visible_checkout(page, timeout: int = 8000) -> bool:
     groups = [
-        page.locator('[data-autom="checkout"]'),
+        page.locator('[data-autom="checkout"]:not([class*="applepay" i])'),
         page.get_by_role("button", name=CHECKOUT_PATTERN),
+        page.get_by_role("link", name=CHECKOUT_PATTERN),
     ]
     for group in groups:
         try:
@@ -237,6 +359,8 @@ async def _click_visible_checkout(page, timeout: int = 8000) -> bool:
             handle = group.nth(index)
             try:
                 if not await handle.is_visible():
+                    continue
+                if await _is_apple_pay_control(handle):
                     continue
                 await handle.click(timeout=timeout)
                 return True
@@ -315,6 +439,8 @@ async def _click_add_to_bag(page, timeout: int = 4000) -> bool:
 
 
 async def _on_place_order_step(page) -> bool:
+    if checkout_stage(page.url) == "review":
+        return True
     if re.search(r"checkout.*(review|placeorder|namedPlaceOrder)", page.url, re.I):
         return True
     locator = page.get_by_role("button", name=PLACE_ORDER_PATTERN)
@@ -324,8 +450,105 @@ async def _on_place_order_step(page) -> bool:
         return False
 
 
-async def _fill_labeled(page, patterns: list[str], value: str) -> bool:
-    if not value:
+async def _open_bag(page) -> None:
+    if checkout_stage(page.url) == "bag":
+        return
+    locators = [
+        page.get_by_role("button", name=VIEW_BAG_PATTERN),
+        page.get_by_role("link", name=VIEW_BAG_PATTERN),
+        page.get_by_text(VIEW_BAG_PATTERN),
+        page.locator('[data-autom*="bag" i]'),
+    ]
+    for locator in locators:
+        try:
+            if await locator.count() == 0:
+                continue
+            await locator.first.click(timeout=4000)
+            try:
+                await page.wait_for_url(re.compile(r"/shop/bag", re.I), timeout=8000)
+            except Exception:
+                pass
+            if checkout_stage(page.url) == "bag":
+                return
+        except Exception:
+            continue
+    if checkout_stage(page.url) != "bag":
+        await page.goto(bag_url(), wait_until="domcontentloaded", timeout=30_000)
+
+
+async def _set_bag_quantity(page, quantity: int) -> int:
+    wanted = max(1, int(quantity or 1))
+    if wanted <= 1:
+        return 1
+    locators = [
+        page.locator('select[data-autom*="quantity" i]'),
+        page.get_by_label(re.compile(r"^數量$|^Quantity$", re.I)),
+        page.locator('select[name*="quantity" i]'),
+        page.locator("select.rs-quantity-dropdown, .quantity select"),
+    ]
+    for locator in locators:
+        try:
+            handle = locator.first
+            await handle.wait_for(state="visible", timeout=2000)
+            for qty in range(wanted, 0, -1):
+                candidate = str(qty)
+                try:
+                    await handle.select_option(value=candidate, timeout=1200)
+                    return qty
+                except Exception:
+                    try:
+                        await handle.select_option(label=candidate, timeout=1200)
+                        return qty
+                    except Exception:
+                        continue
+        except Exception:
+            continue
+    return 1
+
+
+def _fill_values(value: str | list[str]) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value else []
+    return [item for item in value if item]
+
+
+async def _choose_input_value(handle, values: list[str]) -> str:
+    chosen = values[0]
+    try:
+        maxlength = str(await handle.get_attribute("maxlength") or "")
+    except Exception:
+        maxlength = ""
+    if maxlength == "4":
+        four = next((item for item in values if len(re.sub(r"\D", "", item)) == 4), None)
+        if four:
+            return four
+    slash = next((item for item in values if "/" in item), None)
+    if slash and maxlength in {"5", "7"}:
+        return slash
+    return chosen
+
+
+async def _apply_fill(handle, values: list[str]) -> bool:
+    tag = await handle.evaluate("el => (el.tagName || '').toLowerCase()")
+    if tag == "select":
+        for candidate in values:
+            try:
+                await handle.select_option(value=candidate, timeout=1500)
+                return True
+            except Exception:
+                try:
+                    await handle.select_option(label=candidate, timeout=1500)
+                    return True
+                except Exception:
+                    continue
+        return False
+    await handle.fill(await _choose_input_value(handle, values), timeout=2000)
+    return True
+
+
+async def _fill_labeled(page, patterns: list[str], value: str | list[str]) -> bool:
+    values = _fill_values(value)
+    if not values:
         return False
     joined = re.compile("|".join(patterns), re.I)
     locators = [
@@ -337,21 +560,41 @@ async def _fill_labeled(page, patterns: list[str], value: str) -> bool:
         try:
             handle = locator.first
             await handle.wait_for(state="visible", timeout=1800)
-            tag = await handle.evaluate("el => (el.tagName || '').toLowerCase()")
-            if tag == "select":
-                try:
-                    await handle.select_option(value=value, timeout=1500)
-                except Exception:
-                    await handle.select_option(label=value, timeout=1500)
-            else:
-                await handle.fill(value, timeout=2000)
-            return True
+            if await _apply_fill(handle, values):
+                return True
         except Exception:
             continue
     return False
 
 
-async def _fill_guest(page, guest: GuestProfile | None) -> None:
+async def _fill_combined_expiry(page, combined: str) -> bool:
+    locators = [
+        page.locator("input[autocomplete='cc-exp']"),
+        page.locator("input[placeholder*='MM' i][placeholder*='YY' i]"),
+        page.locator(
+            "input[name*='expiration' i]:not([name*='month' i]):not([name*='year' i])"
+        ),
+    ]
+    for locator in locators:
+        try:
+            handle = locator.first
+            await handle.wait_for(state="visible", timeout=1200)
+            await handle.fill(combined, timeout=2000)
+            return True
+        except Exception:
+            continue
+    return await _fill_labeled(page, COMBINED_EXPIRY_PATTERNS, combined)
+
+
+async def _fill_card_expiry(page, month: str, year: str) -> None:
+    combined = mm_yy(month, year)
+    if combined and await _fill_combined_expiry(page, combined):
+        return
+    await _fill_labeled(page, FIELD_CANDIDATES["card_month"], card_month_options(month))
+    await _fill_labeled(page, FIELD_CANDIDATES["card_year"], card_year_options(year))
+
+
+async def _fill_contact(page, guest: GuestProfile | None) -> None:
     if guest is None:
         return
     mapping = {
@@ -359,14 +602,61 @@ async def _fill_guest(page, guest: GuestProfile | None) -> None:
         "first_name": guest.first_name,
         "email": guest.email,
         "phone": guest.phone,
-        "address": guest.address,
-        "card_number": guest.card_number,
-        "card_month": guest.card_month,
-        "card_year": guest.card_year,
-        "cvv": guest.cvv,
     }
     for key, value in mapping.items():
         await _fill_labeled(page, FIELD_CANDIDATES[key], value)
+
+
+async def _select_hong_kong(page) -> None:
+    await _fill_labeled(
+        page,
+        FIELD_CANDIDATES["country"],
+        ["香港", "Hong Kong", "HK", "HKG"],
+    )
+
+
+async def _fill_address(page, guest: GuestProfile | None) -> None:
+    if guest is None:
+        return
+    street = guest.address_street or guest.address
+    await _fill_labeled(page, FIELD_CANDIDATES["address_street"], street)
+    await _fill_labeled(page, FIELD_CANDIDATES["address_building"], guest.address_building)
+
+
+async def _choose_credit_card(page) -> None:
+    locators = [
+        page.get_by_role("button", name=CREDIT_CARD_PATTERN),
+        page.get_by_role("radio", name=CREDIT_CARD_PATTERN),
+        page.get_by_label(CREDIT_CARD_PATTERN),
+        page.get_by_text(CREDIT_CARD_PATTERN),
+        page.locator('[data-autom*="credit" i], [data-autom*="card" i]'),
+    ]
+    for locator in locators:
+        try:
+            if await locator.count() == 0:
+                continue
+            await locator.first.click(timeout=2500)
+            return
+        except Exception:
+            continue
+
+
+async def _fill_billing(page, guest: GuestProfile | None) -> None:
+    if guest is None:
+        return
+    await _choose_credit_card(page)
+    await _fill_labeled(page, FIELD_CANDIDATES["card_number"], guest.card_number)
+    await _fill_card_expiry(page, guest.card_month, guest.card_year)
+    await _fill_labeled(page, FIELD_CANDIDATES["cvv"], guest.cvv)
+    await _select_hong_kong(page)
+    await _fill_labeled(page, FIELD_CANDIDATES["last_name"], guest.last_name)
+    await _fill_labeled(page, FIELD_CANDIDATES["first_name"], guest.first_name)
+    await _fill_address(page, guest)
+
+
+async def _fill_guest(page, guest: GuestProfile | None) -> None:
+    await _fill_contact(page, guest)
+    await _fill_billing(page, guest)
 
 
 async def _select_pickup_store(page, match: StockMatch, timeout: int) -> None:
@@ -428,7 +718,8 @@ async def _handle_fulfillment(
     if fulfillment == "delivery":
         await _click_choice(page, DELIVERY_PATTERN, timeout=4000)
         if checkout_mode == "guest":
-            await _fill_guest(page, guest)
+            await _fill_contact(page, guest)
+            await _fill_address(page, guest)
         days = await _delivery_days_from_page(page)
         if days is not None and days > delivery_max_days:
             hub.warn("checkout", f"預計送達需 {days} 日，超出設定的 {delivery_max_days} 日內，放棄今次機會")
@@ -441,8 +732,6 @@ async def _handle_fulfillment(
 
     await _select_pickup_store(page, match, timeout=4000)
     await _click_earliest_slot(page)
-    if checkout_mode == "guest":
-        await _fill_guest(page, guest)
     return None
 
 
@@ -457,6 +746,7 @@ async def run_checkout(
     fulfillment: str = "pickup",
     guest: GuestProfile | None = None,
     delivery_max_days: int = 7,
+    quantity: int = 1,
 ) -> CheckoutResult:
     timer = StepTimer()
     if await _stopped(stop_event):
@@ -501,9 +791,14 @@ async def run_checkout(
             return timer.result(False, "add_to_bag_failed")
         timer.mark("add_bag")
 
-        hub.info(worker_name, "已加入購物袋，進入結帳")
+        hub.info(worker_name, "已加入購物袋，查看購物袋")
+        bag_qty = 1
+        await _open_bag(page)
+        bag_qty = await _set_bag_quantity(page, quantity)
+        hub.info(worker_name, "進入結帳（唔會撳 Apple Pay）")
         if not await _click_visible_checkout(page, timeout=CHECKOUT_STEP_TIMEOUT_MS):
             await page.goto(bag_url(), wait_until="domcontentloaded", timeout=30_000)
+            bag_qty = await _set_bag_quantity(page, quantity)
             if not await _click_visible_checkout(page, timeout=CHECKOUT_STEP_TIMEOUT_MS):
                 await page.goto(checkout_url(), wait_until="domcontentloaded", timeout=30_000)
         if checkout_is_blocked(page.url):
@@ -535,6 +830,8 @@ async def run_checkout(
 
         step_deadline = asyncio.get_running_loop().time() + 90
         fulfillment_done = False
+        contact_done = False
+        billing_done = False
         while asyncio.get_running_loop().time() < step_deadline:
             if await _stopped(stop_event):
                 return timer.result(False, "stopped")
@@ -546,24 +843,31 @@ async def run_checkout(
                 return timer.result(False, "guest_blocked", pause=True)
             if await _on_place_order_step(page):
                 break
-            if re.search(r"checkout|fulfillment|pickup|shipping|guest", page.url, re.I) or True:
-                if not fulfillment_done:
-                    skipped = await _handle_fulfillment(
-                        page,
-                        match,
-                        fulfillment,
-                        checkout_mode,
-                        guest,
-                        delivery_max_days,
-                    )
-                    fulfillment_done = True
-                    timer.mark("fulfillment")
-                    if skipped:
-                        return timer.result(False, skipped)
-            await _click_choice(page, SKIP_PATTERN, timeout=1500)
-            if checkout_mode == "guest":
-                await _fill_guest(page, guest)
-            if not await _on_place_order_step(page):
+            stage = checkout_stage(page.url)
+            if not fulfillment_done and stage in ("fulfillment", "other"):
+                skipped = await _handle_fulfillment(
+                    page,
+                    match,
+                    fulfillment,
+                    checkout_mode,
+                    guest,
+                    delivery_max_days,
+                )
+                fulfillment_done = True
+                timer.mark("fulfillment")
+                if skipped:
+                    return timer.result(False, skipped)
+            if checkout_mode == "guest" and stage == "contact" and not contact_done:
+                await _fill_contact(page, guest)
+                contact_done = True
+            if checkout_mode == "guest" and stage == "billing" and not billing_done:
+                await _fill_billing(page, guest)
+                billing_done = True
+            if await _on_place_order_step(page):
+                break
+            if stage == "billing":
+                await _maybe_click(page, REVIEW_ORDER_PATTERN, timeout=CHECKOUT_STEP_TIMEOUT_MS)
+            else:
                 await _maybe_click(page, CONTINUE_PATTERN, timeout=CHECKOUT_STEP_TIMEOUT_MS)
             await asyncio.sleep(0.5)
 
@@ -572,7 +876,7 @@ async def run_checkout(
         timer.mark("payment")
 
         if test_mode:
-            result = timer.result(True, "dry_run")
+            result = timer.result(True, "dry_run", quantity=bag_qty)
             hub.success(worker_name, f"測試模式：已停在最後確認步驟，不會送出訂單。目前頁面：{page.url}")
             hub.success(worker_name, result.report())
             print(result.report(), flush=True)
@@ -585,7 +889,7 @@ async def run_checkout(
             await page.wait_for_url(re.compile(r"checkout/(thankyou|status|complete)|order", re.I), timeout=20_000)
         except Exception:
             pass
-        result = timer.result(True, "ordered")
+        result = timer.result(True, "ordered", quantity=bag_qty)
         hub.success(worker_name, f"已送出訂單（或等待確認頁）。目前頁面：{page.url}")
         hub.success(worker_name, result.report())
         return result

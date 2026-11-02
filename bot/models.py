@@ -31,7 +31,8 @@ GUEST_FIELD_LABELS = {
     "first_name": "英文名字",
     "email": "電郵地址",
     "phone": "香港聯絡電話",
-    "address": "送貨地址",
+    "address_street": "街道地址（區域、地區、街道名稱及號碼）",
+    "address_building": "屋苑或大廈／座數／樓層／單位",
     "card_number": "信用卡號碼",
     "card_month": "有效月份",
     "card_year": "有效年份",
@@ -45,6 +46,8 @@ class GuestProfile(BaseModel):
     email: str = ""
     phone: str = ""
     address: str = ""
+    address_street: str = ""
+    address_building: str = ""
     card_number: str = ""
     card_month: str = ""
     card_year: str = ""
@@ -74,6 +77,14 @@ class GuestProfile(BaseModel):
         if len(digits) not in {3, 4}:
             raise ValueError("CVV 必須係 3 或 4 個數字")
         return digits
+
+    @model_validator(mode="after")
+    def migrate_legacy_address(self) -> "GuestProfile":
+        if not self.address_street and self.address:
+            self.address_street = self.address
+        if not self.address and self.address_street:
+            self.address = self.address_street
+        return self
 
     def missing_labels(self) -> list[str]:
         missing: list[str] = []

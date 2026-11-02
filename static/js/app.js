@@ -29,7 +29,8 @@
     ["first_name", "英文名字"],
     ["email", "電郵地址"],
     ["phone", "香港聯絡電話"],
-    ["address", "送貨地址"],
+    ["address_street", "街道地址（區域、地區、街道名稱及號碼）"],
+    ["address_building", "屋苑或大廈／座數／樓層／單位"],
     ["card_number", "信用卡號碼"],
     ["card_month", "有效月份"],
     ["card_year", "有效年份"],
@@ -188,6 +189,8 @@
       email: "",
       phone: "",
       address: "",
+      address_street: "",
+      address_building: "",
       card_number: "",
       card_month: "",
       card_year: "",
@@ -240,7 +243,8 @@
   }
 
   function guestMissing(worker) {
-    const guest = worker.guest || emptyGuest();
+    const guest = { ...emptyGuest(), ...(worker.guest || {}) };
+    if (!guest.address_street && guest.address) guest.address_street = guest.address;
     const maskedCard = guestHasMaskedCard(guest);
     return GUEST_FIELDS.filter(([key]) => {
       const value = String(guest[key] || "").trim();
@@ -436,7 +440,9 @@
           first_name: card.querySelector(".guest-first")?.value.trim() || "",
           email: card.querySelector(".guest-email")?.value.trim() || "",
           phone: card.querySelector(".guest-phone")?.value.trim() || "",
-          address: card.querySelector(".guest-address")?.value.trim() || "",
+          address: card.querySelector(".guest-address-street")?.value.trim() || "",
+          address_street: card.querySelector(".guest-address-street")?.value.trim() || "",
+          address_building: card.querySelector(".guest-address-building")?.value.trim() || "",
           card_number: card.querySelector(".guest-card")?.value.trim() || "",
           card_month: card.querySelector(".guest-month")?.value.trim() || "",
           card_year: card.querySelector(".guest-year")?.value.trim() || "",
@@ -604,9 +610,10 @@
   function yearOptions(selected) {
     const year = new Date().getFullYear();
     const years = Array.from({ length: 12 }, (_, index) => String(year + index));
-    return [`<option value="">請選擇</option>`].concat(years.map((value) => (
-      `<option value="${esc(value)}" ${String(selected) === value ? "selected" : ""}>${esc(value)}</option>`
-    ))).join("");
+    return [`<option value="">請選擇</option>`].concat(years.map((value) => {
+      const yy = value.slice(-2);
+      return `<option value="${esc(value)}" ${String(selected) === value ? "selected" : ""}>${esc(value)}（${esc(yy)}）</option>`;
+    })).join("");
   }
 
   function monthOptions(selected) {
@@ -625,6 +632,7 @@
     const email = worker.apple_id || "";
     const saved = !isDirty(worker);
     const guest = { ...emptyGuest(), ...(worker.guest || {}) };
+    if (!guest.address_street && guest.address) guest.address_street = guest.address;
     const checkoutMode = worker.checkout_mode || "apple_id";
     const guestIncomplete = checkoutMode === "guest" ? guestMissing(worker) : [];
     const fulfillment = worker.fulfillment || "pickup";
@@ -689,13 +697,14 @@
               <label class="field"><span>英文名字</span><input class="guest-first" type="text" autocomplete="off" value="${esc(guest.first_name)}" /></label>
               <label class="field"><span>電郵地址</span><input class="guest-email" type="email" autocomplete="off" value="${esc(guest.email)}" /></label>
               <label class="field"><span>香港聯絡電話</span><input class="guest-phone" type="tel" autocomplete="off" value="${esc(guest.phone)}" /></label>
-              <label class="field full"><span>送貨地址</span><input class="guest-address" type="text" autocomplete="off" value="${esc(guest.address)}" /></label>
+              <label class="field full"><span>街道地址（區域、地區、街道名稱及號碼）</span><input class="guest-address-street" type="text" autocomplete="off" value="${esc(guest.address_street || guest.address)}" placeholder="例如 中環金融街 8 號" /></label>
+              <label class="field full"><span>屋苑或大廈／座數／樓層／單位</span><input class="guest-address-building" type="text" autocomplete="off" value="${esc(guest.address_building)}" placeholder="例如 國際金融中心一期 15 樓 1501 室" /></label>
               <label class="field full"><span>信用卡號碼（16 個數字）</span><input class="guest-card" type="text" inputmode="numeric" maxlength="16" autocomplete="off" value="${esc(guest.card_number)}" /></label>
               <label class="field"><span>有效月份</span><select class="guest-month">${monthOptions(guest.card_month)}</select></label>
               <label class="field"><span>有效年份</span><select class="guest-year">${yearOptions(guest.card_year)}</select></label>
               <label class="field"><span>CVV 安全碼</span><input class="guest-cvv" type="password" maxlength="4" autocomplete="off" value="${esc(guest.cvv)}" /></label>
             </div>
-            <p class="help">第一次要填晒全部欄位先可以儲存。儲存後可以再改再存：卡號會變成 •••• 後四位，改姓名／地址唔使再填 CVV。要換卡先至要填新嘅 16 位卡號同 CVV。卡號同 CVV 只會加密寫入本機 secrets 資料夾。</p>
+            <p class="help">第一次要填晒全部欄位先可以儲存。儲存後可以再改再存：卡號會變成 •••• 後四位，改姓名／地址唔使再填 CVV。要換卡先至要填新嘅 16 位卡號同 CVV。官網帳單地址有兩欄：第一欄填區域／地區／街道名稱及號碼，第二欄填屋苑或大廈／座數／樓層／單位。控制台年份顯示 2028，填入 Apple 官網時會轉成 MM/YY（例如 12/28），唔會填 12/2028。卡號同 CVV 只會加密寫入本機 secrets 資料夾。</p>
           </div>
           <div class="field full sku-block">
             <span>1. 目標機型（每個 Worker 只搶一個 SKU）</span>
@@ -725,7 +734,7 @@
           <label class="field full">
             <span>購買數量上限（此 Worker 全部門市合計）</span>
             <input class="qty" type="number" min="1" max="99" value="${esc(worker.max_qty)}" />
-            <p class="help">複選 ifc + 沙田、上限填 2：最多搶 2 部（例如 1 部 ifc + 1 部沙田），唔係每間門市各 2 部。Apple 同一型號通常每人最多 2 部。同一個 Apple ID 開多個 Worker 會各自再計一次上限。</p>
+            <p class="help">複選 ifc + 沙田、上限填 2：最多搶 2 部（例如購物袋一次揀 2，或分兩次）。唔係每間門市各 2 部。加車入袋後會喺數量下拉揀呢個剩餘數量。Apple 同一型號通常每人最多 2 部。同一個 Apple ID 開多個 Worker 會各自再計一次上限。</p>
           </label>
         </div>
         <div class="card-save">
@@ -941,6 +950,7 @@
       return false;
     }
     const secretPayload = isGuestMode(worker) && !state.previewMode ? apiProfile(worker) : null;
+    const guestResave = isGuestMode(worker) && Boolean(savedProfile(worker.id));
     const profile = profileOf(worker);
     const index = state.savedWorkers.findIndex((item) => item.id === worker.id);
     if (index >= 0) state.savedWorkers[index] = profile;
@@ -973,7 +983,7 @@
       ts: new Date().toISOString(),
       worker: worker.name,
       level: "success",
-      message: "已儲存此 Worker 設定。",
+      message: guestResave ? `${worker.name} 訪客資料已修改成功` : "已儲存此 Worker 設定。",
     });
     return true;
   }
