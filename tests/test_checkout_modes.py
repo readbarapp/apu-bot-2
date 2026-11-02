@@ -7,12 +7,15 @@ import pytest
 from bot.checkout import (
     ADD_BAG_PATTERN,
     CheckoutResult,
+    GUEST_PATTERN,
     INTERRUPT_MESSAGE,
     NO_APPLECARE_PATTERN,
     NO_TRADEIN_PATTERN,
     SKIP_PATTERN,
     _click_add_to_bag,
+    _continue_as_guest,
     _decline_tradein_and_applecare,
+    checkout_is_blocked,
 )
 from bot.inventory import days_from_quote
 from bot.logs import hub, redact_message
@@ -149,6 +152,71 @@ def test_delivery_days_over_limit_is_detectable() -> None:
     assert days_from_quote("14 日後送到") > 7
 
 
+def test_guest_continue_pattern_and_blocked_urls() -> None:
+    assert GUEST_PATTERN.search("以訪客身份繼續")
+    assert checkout_is_blocked("https://www.apple.com/hk-zh/shop/404")
+    assert checkout_is_blocked("https://secure9.store.apple.com/shop/go/404")
+    assert checkout_is_blocked("https://www.apple.com/hk-zh/shop/sorry/message_generic")
+    assert not checkout_is_blocked(
+        "https://secure9.store.apple.com/hk-zh/shop/checkout/start"
+    )
+
+
+class _FakeGuestPage:
+    def __init__(self, after_url: str) -> None:
+        self.url = "https://secure.store.apple.com/hk-zh/shop/signIn"
+        self.after_url = after_url
+        self.clicks: list[str] = []
+
+    def locator(self, selector: str):
+        return _FakeGuestButton(self, selector)
+
+    def get_by_role(self, *_args, **_kwargs):
+        return _FakeGuestButton(self, "role")
+
+    def on(self, *_args, **_kwargs) -> None:
+        return None
+
+    def remove_listener(self, *_args, **_kwargs) -> None:
+        return None
+
+    async def wait_for_url(self, *_args, **_kwargs) -> None:
+        self.url = self.after_url
+
+
+class _FakeGuestButton:
+    def __init__(self, page: _FakeGuestPage, name: str) -> None:
+        self._page = page
+        self._name = name
+        self.first = self
+
+    async def count(self) -> int:
+        return 1 if "guest-checkout-btn" in self._name else 0
+
+    async def click(self, **_kwargs) -> None:
+        self._page.clicks.append(self._name)
+        self._page.url = self._page.after_url
+
+
+@pytest.mark.asyncio
+async def test_continue_as_guest_detects_apple_404() -> None:
+    page = _FakeGuestPage("https://www.apple.com/hk-zh/shop/404")
+    assert await _continue_as_guest(page) == "guest_blocked"
+    assert page.clicks == ['[data-autom="guest-checkout-btn"]']
+
+
+@pytest.mark.asyncio
+async def test_continue_as_guest_allows_real_checkout() -> None:
+    page = _FakeGuestPage("https://secure.store.apple.com/hk-zh/shop/checkout/start")
+    assert await _continue_as_guest(page) is None
+
+
+@pytest.mark.asyncio
+async def test_continue_as_guest_blocks_if_still_on_signin() -> None:
+    page = _FakeGuestPage("https://secure.store.apple.com/hk-zh/shop/signIn?ssi=abc")
+    assert await _continue_as_guest(page) == "guest_blocked"
+
+
 def test_product_option_patterns_match_current_apple_hk_labels() -> None:
     assert NO_TRADEIN_PATTERN.search("不換購")
     assert NO_APPLECARE_PATTERN.search("無 AppleCare+ 服務計劃保障")
@@ -175,6 +243,9 @@ class _FakeHandle:
 
     async def is_visible(self) -> bool:
         return True
+
+    async def count(self) -> int:
+        return 1
 
     async def click(self, **_kwargs) -> None:
         self._page.clicks.append(self._kind)
@@ -271,3 +342,5 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "User Journey" in readme or "你點用" in readme
     assert "不換購" in readme
     assert "無 AppleCare+" in readme
+    assert "以訪客身份繼續" in readme
+    assert "signInx" in readme

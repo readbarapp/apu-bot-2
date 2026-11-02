@@ -28,17 +28,27 @@ SKIP_PATTERN = re.compile(
     re.I,
 )
 CONTINUE_PATTERN = re.compile(r"^繼續$|^Continue$|繼續結帳", re.I)
-PICKUP_PATTERN = re.compile(r"於 Apple Store 取貨|店內取貨|門市取貨|Pick up|取貨", re.I)
-DELIVERY_PATTERN = re.compile(r"送貨上門|運送|送貨|Delivery|Ship|Home Delivery", re.I)
-GUEST_PATTERN = re.compile(r"訪客結帳|以訪客身份|Guest Checkout|Continue as Guest", re.I)
+PICKUP_PATTERN = re.compile(r"我會前來取貨|於 Apple Store 取貨|店內取貨|門市取貨|Pick up|取貨", re.I)
+DELIVERY_PATTERN = re.compile(r"我希望送貨|送貨上門|運送|送貨|Delivery|Ship|Home Delivery", re.I)
+GUEST_PATTERN = re.compile(
+    r"以訪客身份繼續|訪客結帳|以訪客身份|Guest Checkout|Continue as Guest",
+    re.I,
+)
+BLOCKED_URL_MARKERS = (
+    "/shop/404",
+    "/shop/go/404",
+    "/shop/541",
+    "/shop/sorry",
+    "message_generic",
+)
 INTERRUPT_MESSAGE = "⚠️ 偵測到頁面異常或手動干預，已自動暫停該 Worker，請手動處理後再按恢復"
 
 FIELD_CANDIDATES = {
-    "last_name": [r"姓", r"Last Name", r"lastName", r"familyName"],
-    "first_name": [r"名(?!稱)", r"First Name", r"firstName", r"givenName"],
-    "email": [r"電郵", r"電子郵件", r"Email"],
-    "phone": [r"電話", r"手機", r"Phone", r"Mobile"],
-    "address": [r"地址", r"街道", r"Address", r"Street"],
+    "last_name": [r"姓氏", r"姓", r"Last Name", r"lastName", r"familyName"],
+    "first_name": [r"名字", r"名(?!稱)", r"First Name", r"firstName", r"givenName"],
+    "email": [r"電郵地址", r"電郵", r"電子郵件", r"Email", r"emailAddress"],
+    "phone": [r"電話號碼", r"電話", r"手機", r"Phone", r"Mobile", r"fullDaytimePhone"],
+    "address": [r"街道地址", r"地址", r"街道", r"Address", r"Street"],
     "card_number": [r"卡號", r"信用卡", r"Card Number", r"cardNumber"],
     "card_month": [r"月", r"Month", r"expMonth"],
     "card_year": [r"年", r"Year", r"expYear"],
@@ -100,6 +110,11 @@ async def _stopped(stop_event: asyncio.Event) -> bool:
     return stop_event.is_set()
 
 
+def checkout_is_blocked(url: str) -> bool:
+    text = (url or "").lower()
+    return any(marker in text for marker in BLOCKED_URL_MARKERS)
+
+
 def _looks_unexpected(exc: Exception) -> bool:
     text = str(exc).lower()
     markers = (
@@ -134,7 +149,7 @@ async def _click_role(page, pattern: re.Pattern[str], timeout: int) -> bool:
 
 async def _click_choice(page, pattern: re.Pattern[str], timeout: int = 2500) -> bool:
     """Click a radio/label option such as 不換購 or 無 AppleCare+."""
-    slice_timeout = max(700, min(timeout, 1600))
+    slice_timeout = max(500, min(timeout, 900))
     locators = [
         page.get_by_label(pattern),
         page.get_by_role("radio", name=pattern),
@@ -157,10 +172,95 @@ async def _maybe_click(page, pattern: re.Pattern[str], timeout: int = 2500) -> b
     return await _click_role(page, pattern, timeout)
 
 
+async def _add_bag_enabled(page) -> bool:
+    locator = page.get_by_role("button", name=ADD_BAG_PATTERN)
+    try:
+        if await locator.count() == 0:
+            return False
+        return bool(await locator.first.is_enabled())
+    except Exception:
+        return False
+
+
 async def _decline_tradein_and_applecare(page) -> None:
     """Apple HK iPhone PDPs keep Add to Bag disabled until both options are chosen."""
-    await _click_choice(page, NO_TRADEIN_PATTERN, timeout=3500)
-    await _click_choice(page, NO_APPLECARE_PATTERN, timeout=3500)
+    if await _add_bag_enabled(page):
+        return
+    await _click_choice(page, NO_TRADEIN_PATTERN, timeout=2500)
+    await _click_choice(page, NO_APPLECARE_PATTERN, timeout=2500)
+
+
+async def _click_visible_checkout(page, timeout: int = 8000) -> bool:
+    groups = [
+        page.locator('[data-autom="checkout"]'),
+        page.get_by_role("button", name=CHECKOUT_PATTERN),
+    ]
+    for group in groups:
+        try:
+            count = await group.count()
+        except Exception:
+            continue
+        for index in range(count):
+            handle = group.nth(index)
+            try:
+                if not await handle.is_visible():
+                    continue
+                await handle.click(timeout=timeout)
+                return True
+            except Exception:
+                continue
+    return False
+
+
+async def _continue_as_guest(page, timeout: int = 8000) -> str | None:
+    """Click Apple's guest checkout button. None means continue; a string is a stop reason."""
+    if checkout_is_blocked(page.url):
+        return "guest_blocked"
+    if not re.search(r"signIn", page.url, re.I):
+        return None
+    locators = [
+        page.locator('[data-autom="guest-checkout-btn"]'),
+        page.get_by_role("button", name=GUEST_PATTERN),
+        page.get_by_role("link", name=GUEST_PATTERN),
+    ]
+    clicked = False
+    saw_block = False
+
+    def on_response(response) -> None:
+        nonlocal saw_block
+        url = response.url
+        if response.status == 541 or "/shop/541" in url or "signInx" in url and response.status >= 400:
+            saw_block = True
+
+    try:
+        page.on("response", on_response)
+    except Exception:
+        on_response = None  # type: ignore[assignment]
+    for locator in locators:
+        try:
+            if await locator.count() == 0:
+                continue
+            await locator.first.click(timeout=timeout)
+            clicked = True
+            break
+        except Exception:
+            continue
+    if clicked:
+        try:
+            await page.wait_for_url(
+                re.compile(r"checkout|fulfillment|shipping|pickup|404|sorry|541", re.I),
+                timeout=8_000,
+            )
+        except Exception:
+            await asyncio.sleep(1.2)
+    if on_response is not None:
+        try:
+            page.remove_listener("response", on_response)
+        except Exception:
+            pass
+    if saw_block or checkout_is_blocked(page.url) or re.search(r"signIn", page.url, re.I):
+        return "guest_blocked"
+    return None
 
 
 async def _click_add_to_bag(page, timeout: int = 4000) -> bool:
@@ -221,7 +321,6 @@ async def _fill_labeled(page, patterns: list[str], value: str) -> bool:
 async def _fill_guest(page, guest: GuestProfile | None) -> None:
     if guest is None:
         return
-    await _maybe_click(page, GUEST_PATTERN, timeout=2500)
     mapping = {
         "last_name": guest.last_name,
         "first_name": guest.first_name,
@@ -238,7 +337,7 @@ async def _fill_guest(page, guest: GuestProfile | None) -> None:
 
 
 async def _select_pickup_store(page, match: StockMatch, timeout: int) -> None:
-    await _maybe_click(page, PICKUP_PATTERN, timeout=timeout)
+    await _click_choice(page, PICKUP_PATTERN, timeout=timeout)
     store_pattern = re.compile(re.escape(match.store_name) + r"|" + re.escape(match.store_id), re.I)
     candidates = [
         page.get_by_text(store_pattern),
@@ -294,7 +393,7 @@ async def _handle_fulfillment(
     delivery_max_days: int,
 ) -> str | None:
     if fulfillment == "delivery":
-        await _maybe_click(page, DELIVERY_PATTERN, timeout=4000)
+        await _click_choice(page, DELIVERY_PATTERN, timeout=4000)
         if checkout_mode == "guest":
             await _fill_guest(page, guest)
         days = await _delivery_days_from_page(page)
@@ -359,17 +458,29 @@ async def run_checkout(
         timer.mark("add_bag")
 
         hub.info(worker_name, "已加入購物袋，進入結帳")
-        if not await _maybe_click(page, CHECKOUT_PATTERN, timeout=CHECKOUT_STEP_TIMEOUT_MS):
+        if not await _click_visible_checkout(page, timeout=CHECKOUT_STEP_TIMEOUT_MS):
             await page.goto(bag_url(), wait_until="domcontentloaded", timeout=30_000)
-            if not await _maybe_click(page, CHECKOUT_PATTERN, timeout=CHECKOUT_STEP_TIMEOUT_MS):
+            if not await _click_visible_checkout(page, timeout=CHECKOUT_STEP_TIMEOUT_MS):
                 await page.goto(checkout_url(), wait_until="domcontentloaded", timeout=30_000)
         timer.mark("enter_checkout")
+
+        if checkout_mode == "guest":
+            blocked = await _continue_as_guest(page)
+            if blocked:
+                hub.error(
+                    worker_name,
+                    "官網拒絕訪客結帳（POST /shop/signInx 被擋，之後跳 404）。"
+                    "呢個多數係網絡／風控，唔係撳錯掣。請用香港家用網絡再開測試模式。",
+                )
+                return timer.result(False, blocked)
 
         step_deadline = asyncio.get_running_loop().time() + 90
         fulfillment_done = False
         while asyncio.get_running_loop().time() < step_deadline:
             if await _stopped(stop_event):
                 return timer.result(False, "stopped")
+            if checkout_is_blocked(page.url):
+                return timer.result(False, "guest_blocked")
             if await _on_place_order_step(page):
                 break
             if re.search(r"checkout|fulfillment|pickup|shipping|guest", page.url, re.I) or True:
