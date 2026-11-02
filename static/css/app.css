@@ -302,6 +302,17 @@ h2 { font-size: 16px; }
   opacity: 0.5;
 }
 
+.worker-empty {
+  margin: 0 0 16px;
+  padding: 18px 16px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg-muted);
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
 .worker-card.is-collapsed .worker-body { display: none; }
 .worker-card.is-collapsed { padding-bottom: 12px; }
 
@@ -478,6 +489,11 @@ select {
 input:focus, select:focus {
   outline: none;
   border-color: var(--blue);
+}
+
+input::placeholder {
+  color: var(--muted);
+  opacity: 1;
 }
 
 select.sku, select.pickup {

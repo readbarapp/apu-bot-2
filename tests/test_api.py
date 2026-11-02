@@ -45,6 +45,8 @@ def test_index_and_frontend_assets(client) -> None:
     assert "開始運作" in js.text
     assert "暫停運作" in js.text
     assert "儲存此 Worker" in js.text
+    assert "而家未有 Worker。請撳「新增 Worker」加入搶購程序。" in js.text
+    assert "removeWorker" in js.text
     assert "collapse-toggle" in js.text
     assert "初次設定流程" in page.text
     assert "全部開始搶機" in page.text

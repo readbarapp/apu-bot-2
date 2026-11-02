@@ -99,6 +99,14 @@ async def focus_worker(worker_id: str) -> dict:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
+@app.delete("/api/workers/{worker_id}")
+async def delete_worker(worker_id: str, session_dir: str = "") -> dict:
+    try:
+        return await manager.delete_worker(worker_id, session_dir)
+    except EngineError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
 @app.websocket("/ws/logs")
 async def websocket_logs(ws: WebSocket) -> None:
     await ws.accept()

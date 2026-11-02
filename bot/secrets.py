@@ -14,6 +14,7 @@ SECRETS_DIR = ROOT / "secrets"
 KEY_NAME = "BOT_SECRETS_KEY"
 
 _MASKED_CARD = re.compile(r"^•+\s*\d{2,4}$")
+_MASKED_SECRET = re.compile(r"^[•*]+$")
 
 
 def _load_env_file() -> dict[str, str]:
@@ -72,6 +73,11 @@ def is_masked_card(value: str | None) -> bool:
     return not text or bool(_MASKED_CARD.match(text))
 
 
+def is_masked_secret(value: str | None) -> bool:
+    text = (value or "").strip()
+    return not text or bool(_MASKED_SECRET.fullmatch(text))
+
+
 def public_guest(guest: dict) -> dict:
     digits = re.sub(r"\D", "", str(guest.get("card_number") or ""))
     return {
@@ -119,6 +125,14 @@ def load_guest_secrets(worker_id: str) -> dict | None:
     return json.loads(decrypt_text(path.read_text(encoding="utf-8")))
 
 
+def delete_guest_secrets(worker_id: str) -> None:
+    path = SECRETS_DIR / f"{worker_id}.enc"
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def merge_guest_payload(worker_id: str, incoming: dict) -> dict:
     stored = load_guest_secrets(worker_id) or {}
     merged = {**stored}
@@ -126,7 +140,7 @@ def merge_guest_payload(worker_id: str, incoming: dict) -> dict:
         text = str(value or "").strip()
         if key == "card_number" and (is_masked_card(text) or not text):
             continue
-        if key == "cvv" and not text:
+        if key == "cvv" and is_masked_secret(text):
             continue
         if text:
             merged[key] = text

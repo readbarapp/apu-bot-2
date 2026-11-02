@@ -116,10 +116,12 @@ class DummyWorker:
 
 
 @pytest.fixture
-def client(monkeypatch):
+def client(monkeypatch, tmp_path):
     async def fake_playwright(self) -> None:
         self._playwright = object()
 
+    monkeypatch.setattr("bot.secrets.SECRETS_DIR", tmp_path / "secrets")
+    monkeypatch.setattr("bot.secrets.ENV_PATH", tmp_path / ".env")
     monkeypatch.setattr(type(manager), "worker_cls", DummyWorker)
     monkeypatch.setattr(type(manager), "_ensure_playwright", fake_playwright)
 
