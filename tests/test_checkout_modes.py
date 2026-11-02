@@ -2,7 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from bot.checkout import CheckoutResult, INTERRUPT_MESSAGE
+import pytest
+
+from bot.checkout import (
+    ADD_BAG_PATTERN,
+    CheckoutResult,
+    INTERRUPT_MESSAGE,
+    NO_APPLECARE_PATTERN,
+    NO_TRADEIN_PATTERN,
+    SKIP_PATTERN,
+    _click_add_to_bag,
+    _decline_tradein_and_applecare,
+)
 from bot.inventory import days_from_quote
 from bot.logs import hub, redact_message
 from bot.secrets import encrypt_text, decrypt_text, public_guest, save_guest_secrets, load_guest_secrets
@@ -138,6 +149,91 @@ def test_delivery_days_over_limit_is_detectable() -> None:
     assert days_from_quote("14 日後送到") > 7
 
 
+def test_product_option_patterns_match_current_apple_hk_labels() -> None:
+    assert NO_TRADEIN_PATTERN.search("不換購")
+    assert NO_APPLECARE_PATTERN.search("無 AppleCare+ 服務計劃保障")
+    assert SKIP_PATTERN.search("不換購")
+    assert SKIP_PATTERN.search("無 AppleCare+ 服務計劃保障")
+    assert ADD_BAG_PATTERN.search("加入購物袋")
+    assert ADD_BAG_PATTERN.search("Add to Bag") is not None
+    assert not ADD_BAG_PATTERN.search("使用 Apple Pay 結帳")
+
+
+class _FakeHandle:
+    def __init__(self, page: "_FakeProductPage", kind: str) -> None:
+        self._page = page
+        self._kind = kind
+        self.first = self
+
+    async def wait_for(self, **_kwargs) -> None:
+        return None
+
+    async def is_enabled(self) -> bool:
+        if self._kind != "add_bag":
+            return True
+        return self._page.tradein_declined and self._page.applecare_declined
+
+    async def is_visible(self) -> bool:
+        return True
+
+    async def click(self, **_kwargs) -> None:
+        self._page.clicks.append(self._kind)
+        if self._kind == "no_tradein":
+            self._page.tradein_declined = True
+        elif self._kind == "no_applecare":
+            self._page.applecare_declined = True
+        elif self._kind == "add_bag":
+            if not await self.is_enabled():
+                raise RuntimeError("add-to-bag is disabled until options are selected")
+            self._page.added = True
+
+    def filter(self, **_kwargs) -> "_FakeHandle":
+        return self
+
+
+class _FakeProductPage:
+    def __init__(self) -> None:
+        self.clicks: list[str] = []
+        self.tradein_declined = False
+        self.applecare_declined = False
+        self.added = False
+
+    def _handle(self, pattern, fallback: str) -> _FakeHandle:
+        text = pattern.pattern if hasattr(pattern, "pattern") else str(pattern)
+        if "不換購" in text or "trade" in text.lower():
+            return _FakeHandle(self, "no_tradein")
+        if "AppleCare" in text:
+            return _FakeHandle(self, "no_applecare")
+        if "加入購物袋" in text or "add-to-cart" in text:
+            return _FakeHandle(self, "add_bag")
+        return _FakeHandle(self, fallback)
+
+    def get_by_label(self, pattern):
+        return self._handle(pattern, "label")
+
+    def get_by_role(self, role, name=None):
+        return self._handle(name or role, role)
+
+    def get_by_text(self, pattern):
+        return self._handle(pattern, "text")
+
+    def locator(self, selector: str):
+        return self._handle(selector, "locator")
+
+
+@pytest.mark.asyncio
+async def test_decline_options_before_add_to_bag() -> None:
+    page = _FakeProductPage()
+    assert await _click_add_to_bag(page) is False
+    assert page.added is False
+    await _decline_tradein_and_applecare(page)
+    assert page.clicks[:2] == ["no_tradein", "no_applecare"]
+    assert page.tradein_declined and page.applecare_declined
+    assert await _click_add_to_bag(page)
+    assert page.added is True
+    assert page.clicks[-1] == "add_bag"
+
+
 def test_performance_report_lists_four_steps() -> None:
     result = CheckoutResult(
         ok=True,
@@ -173,3 +269,5 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "組合 A：Apple ID + 門市自取" in readme
     assert "組合 D：訪客 + 送貨上門" in readme
     assert "User Journey" in readme or "你點用" in readme
+    assert "不換購" in readme
+    assert "無 AppleCare+" in readme

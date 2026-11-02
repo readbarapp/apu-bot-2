@@ -12,10 +12,19 @@ from bot.models import GuestProfile
 
 PLACE_ORDER_PATTERN = re.compile(r"立即下單|下訂單|Place Your Order|Place Order", re.I)
 ADD_BAG_PATTERN = re.compile(r"加入購物袋|Add to Bag|Add to Cart", re.I)
+NO_TRADEIN_PATTERN = re.compile(
+    r"^不換購$|不使用折抵|不使用 iPhone 折抵|No trade-?in",
+    re.I,
+)
+NO_APPLECARE_PATTERN = re.compile(
+    r"無 AppleCare|沒有 AppleCare|No AppleCare|Without AppleCare",
+    re.I,
+)
 CHECKOUT_PATTERN = re.compile(r"^結帳$|^Check Out$|Checkout", re.I)
 SKIP_PATTERN = re.compile(
-    r"不使用折抵|不使用 iPhone 折抵|不，謝謝|暫時不加入|沒有 AppleCare|"
-    r"No AppleCare|No trade-in|Skip|略過此步驟|現在不要|不加入",
+    r"不換購|不使用折抵|不使用 iPhone 折抵|不，謝謝|暫時不加入|"
+    r"無 AppleCare|沒有 AppleCare|No AppleCare|Without AppleCare|"
+    r"No trade-in|Skip|略過此步驟|現在不要|不加入",
     re.I,
 )
 CONTINUE_PATTERN = re.compile(r"^繼續$|^Continue$|繼續結帳", re.I)
@@ -123,8 +132,53 @@ async def _click_role(page, pattern: re.Pattern[str], timeout: int) -> bool:
         return False
 
 
+async def _click_choice(page, pattern: re.Pattern[str], timeout: int = 2500) -> bool:
+    """Click a radio/label option such as 不換購 or 無 AppleCare+."""
+    slice_timeout = max(700, min(timeout, 1600))
+    locators = [
+        page.get_by_label(pattern),
+        page.get_by_role("radio", name=pattern),
+        page.locator("label").filter(has_text=pattern),
+        page.get_by_role("button", name=pattern),
+        page.get_by_text(pattern),
+    ]
+    for locator in locators:
+        try:
+            handle = locator.first
+            await handle.wait_for(state="visible", timeout=slice_timeout)
+            await handle.click(timeout=slice_timeout)
+            return True
+        except Exception:
+            continue
+    return False
+
+
 async def _maybe_click(page, pattern: re.Pattern[str], timeout: int = 2500) -> bool:
     return await _click_role(page, pattern, timeout)
+
+
+async def _decline_tradein_and_applecare(page) -> None:
+    """Apple HK iPhone PDPs keep Add to Bag disabled until both options are chosen."""
+    await _click_choice(page, NO_TRADEIN_PATTERN, timeout=3500)
+    await _click_choice(page, NO_APPLECARE_PATTERN, timeout=3500)
+
+
+async def _click_add_to_bag(page, timeout: int = 4000) -> bool:
+    locators = [
+        page.get_by_role("button", name=ADD_BAG_PATTERN),
+        page.locator('button[data-autom="add-to-cart"]:not(.rf-pdp-applepay-button)'),
+    ]
+    for locator in locators:
+        try:
+            handle = locator.first
+            await handle.wait_for(state="visible", timeout=min(timeout, 2000))
+            if not await handle.is_enabled():
+                continue
+            await handle.click(timeout=timeout)
+            return True
+        except Exception:
+            continue
+    return False
 
 
 async def _on_place_order_step(page) -> bool:
@@ -283,18 +337,22 @@ async def run_checkout(
         if await _stopped(stop_event):
             return timer.result(False, "stopped")
 
+        hub.info(worker_name, "產品頁已開，先揀不換購同無 AppleCare+，再開加車")
+        await _decline_tradein_and_applecare(page)
+
         deadline = asyncio.get_running_loop().time() + 45
         added = False
         while asyncio.get_running_loop().time() < deadline:
             if await _stopped(stop_event):
                 return timer.result(False, "stopped")
-            if await _maybe_click(page, ADD_BAG_PATTERN, timeout=CHECKOUT_STEP_TIMEOUT_MS):
+            if await _click_add_to_bag(page, timeout=4000):
                 added = True
                 break
-            await _maybe_click(page, SKIP_PATTERN, timeout=1800)
+            await _decline_tradein_and_applecare(page)
+            await _click_choice(page, SKIP_PATTERN, timeout=1500)
             if not await _on_place_order_step(page):
                 await _maybe_click(page, CONTINUE_PATTERN, timeout=1500)
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.3)
 
         if not added:
             return timer.result(False, "add_to_bag_failed")
@@ -328,7 +386,7 @@ async def run_checkout(
                     timer.mark("fulfillment")
                     if skipped:
                         return timer.result(False, skipped)
-            await _maybe_click(page, SKIP_PATTERN, timeout=1500)
+            await _click_choice(page, SKIP_PATTERN, timeout=1500)
             if checkout_mode == "guest":
                 await _fill_guest(page, guest)
             if not await _on_place_order_step(page):
