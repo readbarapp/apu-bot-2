@@ -382,5 +382,9 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "signInx" in readme
     assert "本機 Google Chrome" in readme
     assert "屋企 IP 都被當 bot" in readme
+    assert "Duo 冇貨" in readme
+    assert "MHRV4ZA/A" in readme
+    assert "揀返 Duo" in readme
+    assert "3.2–3.9 秒" in readme
     assert "【請複製呢段到對話】" in readme
     assert "平時用嘅 Chrome" in readme
