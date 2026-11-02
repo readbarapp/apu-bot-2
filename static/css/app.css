@@ -480,6 +480,11 @@ input:focus, select:focus {
   border-color: var(--blue);
 }
 
+input::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+
 select.sku, select.pickup {
   border-color: rgba(59, 130, 246, 0.45);
   background: #0b1220;

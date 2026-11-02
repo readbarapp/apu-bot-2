@@ -274,16 +274,30 @@ def test_guest_incomplete_is_rejected(client) -> None:
 def test_guest_missing_card_or_cvv_is_rejected(client) -> None:
     no_cvv = {
         **SAMPLE_GUEST,
+        "id": "g_missing_cvv",
+        "session_dir": "session_guest_missing_cvv",
         "guest": {**SAMPLE_GUEST["guest"], "cvv": ""},
     }
     no_card = {
         **SAMPLE_GUEST,
-        "id": "g2",
-        "session_dir": "session_guest_2",
+        "id": "g_missing_card",
+        "session_dir": "session_guest_missing_card",
         "guest": {**SAMPLE_GUEST["guest"], "card_number": ""},
     }
-    assert client.post("/api/start", json={"test_mode": True, "workers": [no_cvv]}).status_code == 422
-    assert client.post("/api/start", json={"test_mode": True, "workers": [no_card]}).status_code == 422
+    assert client.post("/api/start", json={"test_mode": True, "workers": [no_cvv]}).status_code == 400
+    assert client.post("/api/start", json={"test_mode": True, "workers": [no_card]}).status_code == 400
+
+
+def test_guest_can_start_with_blank_card_fields_after_secrets(client) -> None:
+    first = client.post("/api/workers/secrets", json={"test_mode": True, "worker": SAMPLE_GUEST})
+    assert first.status_code == 200, first.text
+    blank = {
+        **SAMPLE_GUEST,
+        "guest": {**SAMPLE_GUEST["guest"], "card_number": "", "cvv": ""},
+    }
+    started = client.post("/api/start", json={"test_mode": True, "workers": [blank]})
+    assert started.status_code == 200, started.text
+    client.post("/api/stop")
 
 
 def test_guest_can_resave_with_masked_card_and_blank_cvv(client) -> None:
@@ -774,6 +788,9 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "填晒先可以儲存同開始運作" in js
     assert "可以再改再存" in js
     assert "guestHasMaskedCard" in js
+    assert "guestHasStoredCard" in js
+    assert "已儲存信用卡" in js
+    assert "欄位空白＝繼續用呢張卡" in js
     assert "訪客資料已修改成功" in js
     assert "guestResave" in js
     assert "slice(-2)" in js
