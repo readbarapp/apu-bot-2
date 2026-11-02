@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 import pytest
 
@@ -18,6 +19,7 @@ from bot.checkout import (
     NO_TRADEIN_PATTERN,
     PICKUP_PATTERN,
     PICKUP_LOCATION_PATTERN,
+    PICKUP_LOCATION_UI_PATTERN,
     APPLY_PATTERN,
     REVIEW_ORDER_PATTERN,
     SKIP_PATTERN,
@@ -25,6 +27,8 @@ from bot.checkout import (
     _click_add_to_bag,
     _continue_as_guest,
     _apply_pickup_location,
+    _guest_nav_done,
+    _still_on_signin,
     guest_block_extra,
     _decline_tradein_and_applecare,
     _fill_card_expiry,
@@ -447,6 +451,8 @@ def test_guest_continue_pattern_and_blocked_urls() -> None:
     assert not GUEST_BUTTON_PATTERN.search("以訪客身份")
     assert guest_block_extra("guest_button_missed").startswith("畫面停喺登入牆")
     assert "被擋" in guest_block_extra("guest_blocked")
+    assert "未跳去結帳" in guest_block_extra("guest_nav_timeout")
+    assert "唔好連撳訪客" in guest_block_extra("guest_nav_timeout")
     assert checkout_is_blocked("https://www.apple.com/hk-zh/shop/404")
     assert checkout_is_blocked("https://secure9.store.apple.com/shop/go/404")
     assert checkout_is_blocked("https://www.apple.com/hk-zh/shop/sorry/message_generic")
@@ -548,10 +554,26 @@ async def test_continue_as_guest_allows_real_checkout() -> None:
 
 
 @pytest.mark.asyncio
-async def test_continue_as_guest_blocks_if_still_on_signin() -> None:
+async def test_continue_as_guest_waits_if_still_on_signin() -> None:
     page = _FakeGuestPage("https://secure.store.apple.com/hk-zh/shop/signIn?ssi=abc")
-    assert await _continue_as_guest(page) == "guest_blocked"
+    assert await _continue_as_guest(page) == "guest_clicked"
     assert page.clicks
+
+
+def test_guest_nav_done_uses_path_not_query() -> None:
+    signin = (
+        "https://secure6.store.apple.com/hk-zh/shop/signIn?ssi="
+        "abccheckoutstartFulfillment"
+    )
+    assert _still_on_signin(signin)
+    assert not _guest_nav_done(signin)
+    assert _guest_nav_done(
+        "https://secure6.store.apple.com/hk-zh/shop/checkout?_s=Fulfillment-init"
+    )
+    assert _guest_nav_done("https://www.apple.com/hk-zh/shop/404")
+    assert not _still_on_signin(
+        "https://secure6.store.apple.com/hk-zh/shop/checkout?_s=Fulfillment-init"
+    )
 
 
 @pytest.mark.asyncio
@@ -645,14 +667,39 @@ def test_product_option_patterns_match_current_apple_hk_labels() -> None:
     assert APPLY_PATTERN.search("套用")
     assert APPLY_PATTERN.search("Apply")
     assert PICKUP_LOCATION_PATTERN.search("地區（例如「中環」）")
+    assert PICKUP_LOCATION_UI_PATTERN.search("了解你可在哪裡取貨。")
+    assert PICKUP_LOCATION_UI_PATTERN.search("地區（例如「中環」）")
     assert DELIVERY_PATTERN.search("我希望送貨")
 
 
 class _FakePickupPage:
-    def __init__(self) -> None:
+    def __init__(self, mode: str = "placeholder") -> None:
+        self.mode = mode
         self.filled: list[str] = []
+        self.typed: list[str] = []
         self.clicks: list[str] = []
+        self.value = ""
         self.keyboard = self
+
+    def _visible(self, kind: str, name) -> bool:
+        if self.mode == "missing":
+            return False
+        if self.mode == "placeholder":
+            return True
+        text = str(getattr(name, "pattern", name) or "")
+        if kind in {"placeholder", "label"}:
+            return False
+        if kind == "locator":
+            return bool(
+                re.search(
+                    r"storelocator|store-locator|storeLocator|searchInput|search-input|store-search",
+                    text,
+                    re.I,
+                )
+            )
+        if kind in {"textbox", "combobox", "searchbox"}:
+            return False
+        return True
 
     def get_by_placeholder(self, pattern):
         return _FakePickupControl(self, "placeholder", pattern)
@@ -672,6 +719,11 @@ class _FakePickupPage:
     async def press(self, key: str) -> None:
         self.clicks.append(key)
 
+    async def type(self, text: str, **_kwargs) -> None:
+        self.typed.append(text)
+        self.value = text
+        self.filled.append(text)
+
 
 class _FakePickupControl:
     def __init__(self, page: _FakePickupPage, kind: str, name) -> None:
@@ -680,14 +732,35 @@ class _FakePickupControl:
         self._name = name
         self.first = self
 
+    def _visible(self) -> bool:
+        return self._page._visible(self._kind, self._name)
+
     async def wait_for(self, **_kwargs) -> None:
-        return None
+        if not self._visible():
+            raise TimeoutError(f"{self._kind}:{self._name}")
+
+    async def is_visible(self) -> bool:
+        return self._visible()
 
     async def fill(self, value: str, **_kwargs) -> None:
+        if not self._visible():
+            raise TimeoutError(self._kind)
+        self._page.value = value
         self._page.filled.append(value)
 
+    async def input_value(self) -> str:
+        return self._page.value
+
     async def click(self, **_kwargs) -> None:
+        if not self._visible():
+            raise TimeoutError(self._kind)
         self._page.clicks.append(str(getattr(self._name, "pattern", self._name)))
+
+    async def type(self, value: str, **_kwargs) -> None:
+        await self.fill(value)
+
+    async def press_sequentially(self, value: str, **_kwargs) -> None:
+        await self.fill(value)
 
 
 @pytest.mark.asyncio
@@ -698,9 +771,30 @@ async def test_apply_pickup_location_fills_hong_kong_and_clicks_apply() -> None:
     assert await _apply_pickup_location(page) is True
     assert page.filled[0] == PICKUP_LOCATION
     assert page.filled[0] == "Hong Kong"
-    assert any("套用" in click or "Apply" in click for click in page.clicks)
+    assert any(
+        "套用" in click or "Apply" in click or "search-button" in click.lower() or "storelocator" in click.lower()
+        for click in page.clicks
+    )
     assert not PICKUP_PATTERN.search("取貨分店")
     assert not DELIVERY_PATTERN.search("送貨地址")
+
+
+@pytest.mark.asyncio
+async def test_apply_pickup_location_fills_apple_store_search_input() -> None:
+    from bot.catalogs import PICKUP_LOCATION
+
+    page = _FakePickupPage(mode="search_input")
+    assert await _apply_pickup_location(page, timeout=2000) is True
+    assert page.filled[0] == PICKUP_LOCATION
+    assert page.value == "Hong Kong"
+    assert any("search" in click.lower() or "storelocator" in click.lower() for click in page.clicks)
+
+
+@pytest.mark.asyncio
+async def test_apply_pickup_location_reports_missing_district_field() -> None:
+    page = _FakePickupPage(mode="missing")
+    assert await _apply_pickup_location(page, timeout=400) is False
+    assert page.filled == []
 
 
 class _FakeResponse:
