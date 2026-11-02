@@ -13,6 +13,7 @@
     needs_login: "未登入 Apple ID",
     logging_in: "等待登入中",
     ready: "待命（已登入）",
+    ready_guest: "待命（已填妥資料）",
     launching: "正在開啟瀏覽器",
     watching: "監控庫存中",
     checking_out: "正在結帳",
@@ -148,8 +149,36 @@
     return crypto.randomUUID ? crypto.randomUUID() : `w_${Date.now()}_${Math.random()}`;
   }
 
-  function statusLabel(status) {
+  const ACTIVE_STATUSES = new Set([
+    "logging_in", "launching", "watching", "checking_out",
+    "dry_run_paused", "completed", "stopped", "paused",
+    "browser_closed", "error",
+  ]);
+
+  function cardDigits(value) {
+    return String(value || "").replace(/\D/g, "");
+  }
+
+  function isMaskedCard(value) {
+    return /[•*]/.test(String(value || ""));
+  }
+
+  function statusLabel(status, worker) {
+    if (worker && isGuestMode(worker) && !ACTIVE_STATUSES.has(status)) {
+      return guestReady(worker) ? "待命（已填妥資料）" : "尚未填妥訪客資料";
+    }
     return STATUS_LABELS[status] || STATUS_LABELS.idle;
+  }
+
+  function guestReady(worker) {
+    return isGuestMode(worker) && !isDirty(worker) && guestMissing(worker).length === 0;
+  }
+
+  function displayStatus(worker) {
+    const status = worker.status || "needs_login";
+    if (ACTIVE_STATUSES.has(status)) return status;
+    if (isGuestMode(worker)) return guestReady(worker) ? "ready" : "needs_login";
+    return status;
   }
 
   function emptyGuest() {
@@ -209,8 +238,11 @@
     const guest = worker.guest || emptyGuest();
     return GUEST_FIELDS.filter(([key]) => {
       const value = String(guest[key] || "").trim();
-      if (key === "card_number") return !value;
-      if (key === "cvv") return !value && !String(guest.card_number || "").includes("•");
+      if (key === "card_number") {
+        if (isMaskedCard(value) && cardDigits(value).length >= 4) return false;
+        return cardDigits(value).length !== 16;
+      }
+      if (key === "cvv") return !value && !isMaskedCard(guest.card_number);
       return !value;
     }).map(([, label]) => label);
   }
@@ -397,6 +429,7 @@
     });
     persistDraft();
     updateSaveHint();
+    state.workers.forEach(patchWorkerStatus);
   }
 
   function modeHint() {
@@ -558,7 +591,7 @@
   }
 
   function workerCardHtml(worker, entering) {
-    const status = worker.status || (worker.logged_in ? "ready" : "needs_login");
+    const status = displayStatus(worker);
     const sniping = Boolean(worker.sniping);
     const loggedIn = Boolean(worker.logged_in || worker.apple_id);
     const closed = status === "browser_closed";
@@ -569,7 +602,9 @@
     const checkoutMode = worker.checkout_mode || "apple_id";
     const fulfillment = worker.fulfillment || "pickup";
     const note = worker.last_message || (checkoutMode === "guest"
-      ? "訪客模式：填妥個人同信用卡資料後，撳「儲存此 Worker」就可以開始運作。"
+      ? (guestReady(worker)
+        ? "訪客資料已填妥並已儲存。可以撳「開始運作」或上面綠色「全部開始搶機」。"
+        : "訪客模式：填妥個人同信用卡資料後，撳「儲存此 Worker」就可以開始運作。唔使登入 Apple ID。")
       : (loggedIn
         ? "已登入。可以撳「開始運作」或上面綠色「全部開始搶機」。"
         : "未登入。請先撳「登入 Apple ID」。"));
@@ -583,7 +618,7 @@
             <strong class="worker-title">${esc(worker.name)}</strong>
             <p class="collapsed-meta">${esc(meta)}</p>
           </div>
-          <span class="badge ${esc(status)}">${esc(statusLabel(status))}${worker.purchased ? ` · ${worker.purchased}/${worker.max_qty}` : ""}</span>
+          <span class="badge ${esc(status)}">${esc(statusLabel(status, worker))}${worker.purchased ? ` · ${worker.purchased}/${worker.max_qty}` : ""}</span>
           <div class="worker-top-actions">
             <button type="button" class="btn run-one" ${canRun(worker) ? "" : "disabled"}>開始運作</button>
             <button type="button" class="btn pause-one" ${sniping ? "" : "disabled"}>暫停運作</button>
@@ -628,12 +663,12 @@
               <label class="field"><span>電郵地址</span><input class="guest-email" type="email" autocomplete="off" value="${esc(guest.email)}" /></label>
               <label class="field"><span>香港聯絡電話</span><input class="guest-phone" type="tel" autocomplete="off" value="${esc(guest.phone)}" /></label>
               <label class="field full"><span>送貨地址</span><input class="guest-address" type="text" autocomplete="off" value="${esc(guest.address)}" /></label>
-              <label class="field full"><span>信用卡號碼</span><input class="guest-card" type="text" inputmode="numeric" autocomplete="off" value="${esc(guest.card_number)}" /></label>
+              <label class="field full"><span>信用卡號碼（16 個數字）</span><input class="guest-card" type="text" inputmode="numeric" maxlength="16" autocomplete="off" value="${esc(guest.card_number)}" /></label>
               <label class="field"><span>有效月份</span><select class="guest-month">${monthOptions(guest.card_month)}</select></label>
               <label class="field"><span>有效年份</span><select class="guest-year">${yearOptions(guest.card_year)}</select></label>
               <label class="field"><span>CVV 安全碼</span><input class="guest-cvv" type="password" maxlength="4" autocomplete="off" value="${esc(guest.cvv)}" /></label>
             </div>
-            <p class="help">卡號同 CVV 只會加密寫入本機 secrets 資料夾。清瀏覽器後 CVV 要再填一次。</p>
+            <p class="help">信用卡號碼只可以填 16 個數字。卡號同 CVV 只會加密寫入本機 secrets 資料夾。清瀏覽器後 CVV 要再填一次。</p>
           </div>
           <div class="field full sku-block">
             <span>1. 目標機型（每個 Worker 只搶一個 SKU）</span>
@@ -699,7 +734,7 @@
   function patchWorkerStatus(worker) {
     const card = els.list.querySelector(`[data-id="${CSS.escape(worker.id)}"]`);
     if (!card) return;
-    const status = worker.status || "needs_login";
+    const status = displayStatus(worker);
     const sniping = Boolean(worker.sniping);
     const loggedIn = Boolean(worker.logged_in || worker.apple_id);
     const closed = status === "browser_closed";
@@ -713,7 +748,7 @@
     const badge = card.querySelector(".badge");
     if (badge) {
       badge.className = `badge ${status}`;
-      badge.textContent = `${statusLabel(status)}${worker.purchased ? ` · ${worker.purchased}/${worker.max_qty}` : ""}`;
+      badge.textContent = `${statusLabel(status, worker)}${worker.purchased ? ` · ${worker.purchased}/${worker.max_qty}` : ""}`;
     }
     const title = card.querySelector(".worker-title");
     if (title && worker.name) title.textContent = worker.name;
@@ -732,12 +767,22 @@
     const note = card.querySelector(".worker-note");
     if (note) {
       note.classList.toggle("warn", closed);
-      note.textContent = worker.last_message || (loggedIn
-        ? "已登入。可以撳「開始運作」或上面綠色「全部開始搶機」。"
-        : "未登入。請先撳「登入 Apple ID」。");
+      note.textContent = worker.last_message || (isGuestMode(worker)
+        ? (guestReady(worker)
+          ? "訪客資料已填妥並已儲存。可以撳「開始運作」或上面綠色「全部開始搶機」。"
+          : "訪客模式：填妥個人同信用卡資料後，撳「儲存此 Worker」就可以開始運作。唔使登入 Apple ID。")
+        : (loggedIn
+          ? "已登入。可以撳「開始運作」或上面綠色「全部開始搶機」。"
+          : "未登入。請先撳「登入 Apple ID」。"));
     }
     const meta = card.querySelector(".collapsed-meta");
-    if (meta) meta.textContent = `${worker.sku || "未揀 SKU"} · ${loggedIn ? (worker.apple_id || "已登入") : "未登入"}`;
+    if (meta) {
+      const guestBit = isGuestMode(worker)
+        ? (guestReady(worker) ? "訪客已填妥" : "訪客")
+        : (loggedIn ? (worker.apple_id || "已登入") : "未登入");
+      const fulfillBit = isDelivery(worker) ? "送貨" : "自取";
+      meta.textContent = `${worker.sku || "未揀 SKU"} · ${guestBit} · ${fulfillBit}`;
+    }
     const runBtn = card.querySelector(".run-one");
     const pauseBtn = card.querySelector(".pause-one");
     const saved = !isDirty(worker);
@@ -876,6 +921,13 @@
     saveJson(STORAGE_SAVED, state.savedWorkers);
     persistDraft();
     updateSaveHint();
+    if (isGuestMode(worker) && !guestMissing(worker).length) {
+      worker.status = "ready";
+      if (!worker.last_message) {
+        worker.last_message = "訪客資料已填妥並已儲存。可以撳「開始運作」。";
+      }
+    }
+    patchWorkerStatus(worker);
     if (isGuestMode(worker) && !state.previewMode) {
       api("/api/workers/secrets", {
         method: "POST",
@@ -1107,7 +1159,11 @@
     });
   }
 
-  els.list.addEventListener("input", () => {
+  els.list.addEventListener("input", (event) => {
+    if (event.target.classList.contains("guest-card") && !isMaskedCard(event.target.value)) {
+      const digits = cardDigits(event.target.value).slice(0, 16);
+      if (event.target.value !== digits) event.target.value = digits;
+    }
     readCardsIntoState();
   });
   els.list.addEventListener("change", (event) => {

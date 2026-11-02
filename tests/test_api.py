@@ -39,6 +39,8 @@ def test_index_and_frontend_assets(client) -> None:
     assert "FALLBACK_CATALOG" in js.text
     assert "STATUS_LABELS" in js.text
     assert "待命（已登入）" in js.text
+    assert "待命（已填妥資料）" in js.text
+    assert "尚未填妥訪客資料" in js.text
     assert "登入 Apple ID" in js.text
     assert "開始運作" in js.text
     assert "暫停運作" in js.text
