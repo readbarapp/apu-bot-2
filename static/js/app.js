@@ -234,16 +234,23 @@
     return data;
   }
 
+  function guestHasMaskedCard(guest) {
+    const value = String((guest || {}).card_number || "").trim();
+    return isMaskedCard(value) && cardDigits(value).length >= 4;
+  }
+
   function guestMissing(worker) {
     const guest = worker.guest || emptyGuest();
+    const maskedCard = guestHasMaskedCard(guest);
     return GUEST_FIELDS.filter(([key]) => {
       const value = String(guest[key] || "").trim();
       if (key === "card_number") {
-        if (isMaskedCard(value) && cardDigits(value).length >= 4) return false;
+        if (maskedCard) return false;
         return cardDigits(value).length !== 16;
       }
       if (key === "cvv") {
         const digits = cardDigits(value);
+        if (!value) return !maskedCard;
         return digits.length < 3 || digits.length > 4;
       }
       return !value;
@@ -311,7 +318,12 @@
   function isDirty(worker) {
     const saved = savedProfile(worker.id);
     if (!saved) return true;
-    return JSON.stringify(profileOf(worker)) !== JSON.stringify(saved);
+    if (JSON.stringify(profileOf(worker)) !== JSON.stringify(saved)) return true;
+    if (!isGuestMode(worker)) return false;
+    const card = String(worker.guest?.card_number || "").trim();
+    if (card && !isMaskedCard(card) && cardDigits(card).length === 16) return true;
+    const cvv = cardDigits(worker.guest?.cvv);
+    return cvv.length >= 3 && cvv.length <= 4;
   }
 
   function unsavedWorkers() {
@@ -683,7 +695,7 @@
               <label class="field"><span>有效年份</span><select class="guest-year">${yearOptions(guest.card_year)}</select></label>
               <label class="field"><span>CVV 安全碼</span><input class="guest-cvv" type="password" maxlength="4" autocomplete="off" value="${esc(guest.cvv)}" /></label>
             </div>
-            <p class="help">訪客模式要填晒呢度全部欄位先可以儲存同開始運作。信用卡號碼只可以填 16 個數字。卡號同 CVV 只會加密寫入本機 secrets 資料夾。重新開控制台之後 CVV 要再填一次。</p>
+            <p class="help">第一次要填晒全部欄位先可以儲存。儲存後可以再改再存：卡號會變成 •••• 後四位，改姓名／地址唔使再填 CVV。要換卡先至要填新嘅 16 位卡號同 CVV。卡號同 CVV 只會加密寫入本機 secrets 資料夾。</p>
           </div>
           <div class="field full sku-block">
             <span>1. 目標機型（每個 Worker 只搶一個 SKU）</span>
@@ -928,6 +940,7 @@
       window.alert("每個 Worker 要用唔同嘅 session 資料夾，唔好共用。");
       return false;
     }
+    const secretPayload = isGuestMode(worker) && !state.previewMode ? apiProfile(worker) : null;
     const profile = profileOf(worker);
     const index = state.savedWorkers.findIndex((item) => item.id === worker.id);
     if (index >= 0) state.savedWorkers[index] = profile;
@@ -935,18 +948,23 @@
     state.savedWorkers = state.savedWorkers.filter((item) => state.workers.some((workerItem) => workerItem.id === item.id));
     saveJson(STORAGE_SAVED, state.savedWorkers);
     persistDraft();
-    updateSaveHint();
-    if (isGuestMode(worker) && !guestMissing(worker).length) {
-      worker.status = "ready";
-      if (!worker.last_message) {
-        worker.last_message = "訪客資料已填妥並已儲存。可以撳「開始運作」。";
+    if (isGuestMode(worker)) {
+      worker.guest = redactGuest(worker.guest);
+      if (card) {
+        const cardInput = card.querySelector(".guest-card");
+        const cvvInput = card.querySelector(".guest-cvv");
+        if (cardInput) cardInput.value = worker.guest.card_number;
+        if (cvvInput) cvvInput.value = "";
       }
+      worker.status = "ready";
+      worker.last_message = "訪客資料已填妥並已儲存。改錯可以再改再撳儲存。";
     }
+    updateSaveHint();
     patchWorkerStatus(worker);
-    if (isGuestMode(worker) && !state.previewMode) {
+    if (secretPayload) {
       api("/api/workers/secrets", {
         method: "POST",
-        body: JSON.stringify({ test_mode: els.testMode.checked, worker: apiProfile(worker) }),
+        body: JSON.stringify({ test_mode: els.testMode.checked, worker: secretPayload }),
       }).catch((err) => {
         appendLog({ ts: new Date().toISOString(), worker: worker.name, level: "error", message: err.message });
       });
