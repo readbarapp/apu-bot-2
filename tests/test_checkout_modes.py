@@ -509,6 +509,12 @@ def test_add_to_cart_541_is_treated_as_blocked() -> None:
         )
     )
     assert not _response_looks_blocked(
+        _FakeResponse(
+            "https://www.apple.com/hk-zh/shop/fulfillment-messages?parts.0=MGDM4ZA/A",
+            541,
+        )
+    )
+    assert not _response_looks_blocked(
         _FakeResponse("https://www.apple.com/hk-zh/shop/bag", 200)
     )
 
