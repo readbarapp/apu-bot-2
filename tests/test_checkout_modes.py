@@ -346,3 +346,5 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "signInx" in readme
     assert "本機 Google Chrome" in readme
     assert "屋企 IP 都被當 bot" in readme
+    assert "最新實戰流程" in readme
+    assert "Apple ID 登入" in readme
