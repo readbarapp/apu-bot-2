@@ -47,6 +47,15 @@ def test_apple_id_mode_requires_session_dir(client) -> None:
     assert response.status_code == 422
 
 
+def test_guest_card_must_be_sixteen_digits(client) -> None:
+    payload = {
+        **SAMPLE_GUEST,
+        "guest": {**SAMPLE_GUEST["guest"], "card_number": "41111111"},
+    }
+    response = client.post("/api/start", json={"test_mode": True, "workers": [payload]})
+    assert response.status_code == 422
+
+
 def test_guest_incomplete_is_rejected(client) -> None:
     payload = {
         **SAMPLE_GUEST,
@@ -155,6 +164,9 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "guest-cvv" in js
     assert "delivery-days" in js
     assert "訪客模式請填妥" in js
+    assert "待命（已填妥資料）" in js
+    assert "maxlength=\"16\"" in js
+    assert "slice(0, 16)" in js
     assert "paused" in js
     assert "揀結帳模式" in page
     readme = Path("README.md").read_text()
