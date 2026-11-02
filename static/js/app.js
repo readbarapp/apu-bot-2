@@ -382,6 +382,15 @@
     saveJson(STORAGE_COLLAPSED, [...ids]);
   }
 
+  function collapseWorkerCard(id) {
+    setCollapsed(id, true);
+    const card = els.list.querySelector(`[data-id="${CSS.escape(id)}"]`);
+    if (!card) return;
+    card.classList.add("is-collapsed");
+    const toggle = card.querySelector(".collapse-toggle");
+    if (toggle) toggle.setAttribute("aria-expanded", "false");
+  }
+
   function persistDraft() {
     saveJson(STORAGE_PROFILES, serializeWorkers(state.workers));
     saveJson(STORAGE_SKUS, state.extraSkus);
@@ -1088,6 +1097,7 @@
     }
     updateSaveHint();
     patchWorkerStatus(worker);
+    collapseWorkerCard(worker.id);
     appendLog({
       ts: new Date().toISOString(),
       worker: worker.name,

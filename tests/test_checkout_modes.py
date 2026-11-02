@@ -17,11 +17,14 @@ from bot.checkout import (
     NO_APPLECARE_PATTERN,
     NO_TRADEIN_PATTERN,
     PICKUP_PATTERN,
+    PICKUP_LOCATION_PATTERN,
+    APPLY_PATTERN,
     REVIEW_ORDER_PATTERN,
     SKIP_PATTERN,
     VIEW_BAG_PATTERN,
     _click_add_to_bag,
     _continue_as_guest,
+    _apply_pickup_location,
     guest_block_extra,
     _decline_tradein_and_applecare,
     _fill_card_expiry,
@@ -639,7 +642,63 @@ def test_product_option_patterns_match_current_apple_hk_labels() -> None:
     assert CREDIT_CARD_PATTERN.search("信用卡或扣帳卡")
     assert REVIEW_ORDER_PATTERN.search("檢查你的訂單")
     assert PICKUP_PATTERN.search("我會前來取貨")
+    assert APPLY_PATTERN.search("套用")
+    assert APPLY_PATTERN.search("Apply")
+    assert PICKUP_LOCATION_PATTERN.search("地區（例如「中環」）")
     assert DELIVERY_PATTERN.search("我希望送貨")
+
+
+class _FakePickupPage:
+    def __init__(self) -> None:
+        self.filled: list[str] = []
+        self.clicks: list[str] = []
+        self.keyboard = self
+
+    def get_by_placeholder(self, pattern):
+        return _FakePickupControl(self, "placeholder", pattern)
+
+    def get_by_label(self, pattern):
+        return _FakePickupControl(self, "label", pattern)
+
+    def locator(self, selector: str):
+        return _FakePickupControl(self, "locator", selector)
+
+    def get_by_role(self, role: str, name=None, **_kwargs):
+        return _FakePickupControl(self, role, name)
+
+    def get_by_text(self, pattern, **_kwargs):
+        return _FakePickupControl(self, "text", pattern)
+
+    async def press(self, key: str) -> None:
+        self.clicks.append(key)
+
+
+class _FakePickupControl:
+    def __init__(self, page: _FakePickupPage, kind: str, name) -> None:
+        self._page = page
+        self._kind = kind
+        self._name = name
+        self.first = self
+
+    async def wait_for(self, **_kwargs) -> None:
+        return None
+
+    async def fill(self, value: str, **_kwargs) -> None:
+        self._page.filled.append(value)
+
+    async def click(self, **_kwargs) -> None:
+        self._page.clicks.append(str(getattr(self._name, "pattern", self._name)))
+
+
+@pytest.mark.asyncio
+async def test_apply_pickup_location_fills_hong_kong_and_clicks_apply() -> None:
+    from bot.catalogs import PICKUP_LOCATION
+
+    page = _FakePickupPage()
+    assert await _apply_pickup_location(page) is True
+    assert page.filled[0] == PICKUP_LOCATION
+    assert page.filled[0] == "Hong Kong"
+    assert any("套用" in click or "Apply" in click for click in page.clicks)
     assert not PICKUP_PATTERN.search("取貨分店")
     assert not DELIVERY_PATTERN.search("送貨地址")
 
@@ -835,6 +894,7 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "已儲存信用卡" in js
     assert "畫面顯示圓點" in js
     assert "removeWorker" in js
+    assert "collapseWorkerCard" in js
     assert "而家未有 Worker。請撳「新增 Worker」加入搶購程序。" in js
     assert "session_${short}" in js
     assert "訪客資料已修改成功" in js
@@ -880,6 +940,9 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "檢查你的訂單" in readme
     assert "使用 Apple Pay 結帳" in readme
     assert "我會前來取貨" in readme
+    assert "Hong Kong" in readme
+    assert "套用" in readme
+    assert "自動收合" in readme
     assert "我希望送貨" in readme
     assert "Shipping-init" in readme
     assert "訪客模式搶購流程" in readme
