@@ -4,6 +4,19 @@ from pathlib import Path
 
 from bot.manager import manager
 
+SAMPLE_GUEST = {
+    "last_name": "Chan",
+    "first_name": "Tai Man",
+    "email": "chan@example.com",
+    "phone": "51234567",
+    "address_street": "中環金融街 8 號",
+    "address_building": "國際金融中心一期 15 樓 1501 室",
+    "card_number": "4111111111111111",
+    "card_month": "12",
+    "card_year": "2028",
+    "cvv": "123",
+}
+
 SAMPLE_WORKER = {
     "id": "w1",
     "name": "Worker_1",
@@ -12,6 +25,8 @@ SAMPLE_WORKER = {
     "stores": ["R428", "R409"],
     "pickup_window": "1d",
     "max_qty": 1,
+    "checkout_mode": "guest",
+    "guest": SAMPLE_GUEST,
 }
 
 
@@ -38,10 +53,9 @@ def test_index_and_frontend_assets(client) -> None:
     assert "window.confirm" in js.text
     assert "FALLBACK_CATALOG" in js.text
     assert "STATUS_LABELS" in js.text
-    assert "待命（已登入）" in js.text
     assert "待命（已填妥資料）" in js.text
     assert "尚未填妥訪客資料" in js.text
-    assert "登入 Apple ID" in js.text
+    assert "訪客 · 門市自取" in js.text
     assert "開始運作" in js.text
     assert "暫停運作" in js.text
     assert "儲存此 Worker" in js.text
@@ -70,9 +84,10 @@ def test_index_and_frontend_assets(client) -> None:
     assert "初次設定流程" in preview
     assert "購買數量上限（此 Worker 全部門市合計）" in js.text
     assert "唔係每間門市各 2 部" in js.text
-    assert "結帳模式 (Checkout Mode)" in js.text
-    assert "結帳模式" in page.text or "揀結帳模式" in page.text
-    assert "揀結帳模式" in preview
+    assert "訪客 · 門市自取" in js.text
+    assert "訪客 · 送貨上門" in js.text
+    assert "唔使登入 Apple ID" in page.text
+    assert "唔使登入 Apple ID" in preview
 
 
 def test_requirements_skip_packages_that_need_msvc_on_windows() -> None:
@@ -124,30 +139,25 @@ def test_start_requires_worker_and_known_store(client) -> None:
     assert bad_store.status_code == 422
 
 
-def test_start_without_login_is_rejected(client) -> None:
+def test_start_without_guest_fields_is_rejected(client) -> None:
+    payload = {**SAMPLE_WORKER, "guest": {"last_name": "Chan"}}
+    response = client.post("/api/start", json={"test_mode": True, "workers": [payload]})
+    assert response.status_code == 422
+
+
+def test_guest_worker_can_start_without_apple_id_login(client) -> None:
     response = client.post("/api/start", json={"test_mode": True, "workers": [SAMPLE_WORKER]})
-    assert response.status_code == 409
-    assert "Apple ID" in response.json()["detail"]
+    assert response.status_code == 200, response.text
+    assert response.json()["workers"][0]["status"] == "watching"
 
 
 def test_login_then_individual_run_pause_and_global_start(client) -> None:
     payload = {"test_mode": True, "worker": SAMPLE_WORKER}
-    denied = client.post("/api/workers/run", json=payload)
-    assert denied.status_code == 409
-
-    logged = client.post("/api/workers/login", json=payload)
-    assert logged.status_code == 200, logged.text
-    body = logged.json()["workers"][0]
-    assert body["logged_in"] is True
-    assert body["apple_id"] == "tester@icloud.com"
-    assert body["status"] == "ready"
-    worker = manager.workers["w1"]
-    assert worker.focused >= 1
-
     running = client.post("/api/workers/run", json=payload)
-    assert running.status_code == 200
+    assert running.status_code == 200, running.text
     assert running.json()["workers"][0]["sniping"] is True
     assert running.json()["running"] is True
+    worker = manager.workers["w1"]
 
     paused = client.post("/api/workers/w1/pause")
     assert paused.status_code == 200
@@ -165,12 +175,11 @@ def test_login_then_individual_run_pause_and_global_start(client) -> None:
         "session_dir": "session_worker_2",
     }
     mixed = client.post("/api/start", json={"test_mode": True, "workers": [SAMPLE_WORKER, other]})
-    assert mixed.status_code == 409
-    assert "Worker_2" in mixed.json()["detail"]
+    assert mixed.status_code == 200, mixed.text
 
     focused = client.post("/api/workers/w1/focus")
     assert focused.status_code == 200
-    assert worker.focused >= 2
+    assert worker.focused >= 1
 
     stopped = client.post("/api/stop")
     assert stopped.status_code == 200

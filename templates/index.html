@@ -20,8 +20,8 @@
     </header>
 
     <ol class="flow" aria-label="初次設定流程">
-      <li><strong>1. 設定 Worker</strong>揀結帳模式（Apple ID 或訪客）同取貨方式（門市自取或送貨）。數量上限全部門市合計。撳「儲存此 Worker」。</li>
-      <li><strong>2. 登入或填資料</strong>Apple ID 模式要登入。訪客模式要填妥個人同信用卡，唔使登入。</li>
+      <li><strong>1. 設定 Worker</strong>揀訪客門市自取或訪客送貨上門。填妥個人同信用卡，撳「儲存此 Worker」。</li>
+      <li><strong>2. 唔使登入 Apple ID</strong>只係訪客結帳。填晒資料就可以開始。</li>
       <li><strong>3. 全部開始搶機</strong>綠色大掣一次過開全部。單個用「開始運作／暫停運作」。運作中唔可以改設定。</li>
       <li><strong>4. 暫停先至可以改</strong>要改機型或門市，先暫停運作。手動關瀏覽器會自動停嗰個，再撳「開始運作」可重開。</li>
     </ol>
@@ -30,7 +30,7 @@
     <section class="global" aria-label="全域控制面板">
       <div class="global-copy">
         <h2>全部開始搶機</h2>
-        <p>呢粒綠色大掣會一次過叫<strong>所有</strong> Worker 去搶。Apple ID 模式要先登入；訪客模式要填妥資料。</p>
+        <p>呢粒綠色大掣會一次過叫<strong>所有</strong> Worker 去搶。每張卡要填妥訪客資料。</p>
       </div>
       <label class="switch">
         <input type="checkbox" id="test-mode" checked />
@@ -41,7 +41,7 @@
       </label>
       <div class="global-actions">
         <button type="button" id="btn-start" class="btn go" disabled>全部開始搶機</button>
-        <p id="start-hint" class="start-hint blocked">請先喺每張卡撳「儲存此 Worker」。Apple ID 模式要登入；訪客模式要填妥資料。</p>
+        <p id="start-hint" class="start-hint blocked">請先喺每張卡填妥訪客資料，再撳「儲存此 Worker」。</p>
         <button type="button" id="btn-stop" class="btn danger" disabled>緊急停止所有 Bot</button>
       </div>
     </section>
@@ -51,7 +51,7 @@
         <div class="panel-head">
           <div>
             <h2>Worker Profiles</h2>
-            <p>每張卡自己儲存、自己登入、自己開始／暫停。運作中設定會鎖死。要一次過全部開搶，用上面綠色大掣。</p>
+            <p>每張卡自己儲存、自己開始／暫停。運作中設定會鎖死。要一次過全部開搶，用上面綠色大掣。</p>
           </div>
           <div class="panel-actions">
             <button type="button" id="btn-add" class="btn add">新增 Worker</button>

@@ -9,10 +9,10 @@
   const STORAGE_COLLAPSED = "hkIphoneBot.collapsed";
   const PREVIEW_ALERT = "而家係預覽模式：新增／刪除 Worker、改機型、加／刪 SKU、儲存設定都可以試。真正開瀏覽器搶購，請用 Python 開後台後打開 http://127.0.0.1:8765";
   const STATUS_LABELS = {
-    idle: "未登入 Apple ID",
-    needs_login: "未登入 Apple ID",
-    logging_in: "等待登入中",
-    ready: "待命（已登入）",
+    idle: "尚未填妥訪客資料",
+    needs_login: "尚未填妥訪客資料",
+    logging_in: "正在開啟瀏覽器",
+    ready: "待命（已填妥資料）",
     ready_guest: "待命（已填妥資料）",
     launching: "正在開啟瀏覽器",
     watching: "監控庫存中",
@@ -231,7 +231,7 @@
       stores: ["R428"],
       pickup_window: "1d",
       max_qty: 1,
-      checkout_mode: "apple_id",
+      checkout_mode: "guest",
       fulfillment: "pickup",
       delivery_max_days: 7,
       guest: emptyGuest(),
@@ -245,7 +245,7 @@
   }
 
   function isGuestMode(worker) {
-    return (worker.checkout_mode || "apple_id") === "guest";
+    return true;
   }
 
   function isDelivery(worker) {
@@ -337,7 +337,7 @@
       stores: isDelivery(worker) ? [] : (worker.stores || []),
       pickup_window: worker.pickup_window || "1d",
       max_qty: worker.max_qty,
-      checkout_mode: worker.checkout_mode || "apple_id",
+      checkout_mode: "guest",
       fulfillment: worker.fulfillment || "pickup",
       delivery_max_days: Number(worker.delivery_max_days || 7),
       guest: redact ? redactGuest(worker.guest) : { ...emptyGuest(), ...(worker.guest || {}) },
@@ -468,7 +468,7 @@
         };
       }
       const stores = [...card.querySelectorAll(".store:checked")].map((box) => box.value);
-      const checkoutMode = card.querySelector(".checkout-mode")?.value || prev.checkout_mode || "apple_id";
+      const checkoutMode = "guest";
       const fulfillment = card.querySelector(".fulfillment")?.value || prev.fulfillment || "pickup";
       const sessionDir = card.querySelector(".session")?.value.trim()
         || prev.session_dir
@@ -551,8 +551,7 @@
 
   function canRun(worker) {
     if (worker.sniping || isDirty(worker)) return false;
-    if (isGuestMode(worker)) return guestMissing(worker).length === 0;
-    return Boolean(worker.logged_in || worker.apple_id);
+    return guestMissing(worker).length === 0;
   }
 
   function updateStartGate() {
@@ -572,11 +571,6 @@
     if (unsaved.length) {
       els.startHint.className = "start-hint blocked";
       els.startHint.textContent = `請先喺未儲存嘅卡撳「儲存此 Worker」：${unsaved.map((item) => item.name || "未命名").join("、")}`;
-      return;
-    }
-    if (unlogged.length) {
-      els.startHint.className = "start-hint blocked";
-      els.startHint.textContent = `仲有 ${unlogged.length} 個 Apple ID 模式未登入：${unlogged.map((item) => item.name || "未命名").join("、")}。請登入，或者刪除未登入嘅 Worker。`;
       return;
     }
     if (incompleteGuest.length) {
@@ -694,18 +688,14 @@
     const saved = !isDirty(worker);
     const guest = { ...emptyGuest(), ...(worker.guest || {}) };
     if (!guest.address_street && guest.address) guest.address_street = guest.address;
-    const checkoutMode = worker.checkout_mode || "apple_id";
-    const guestIncomplete = checkoutMode === "guest" ? guestMissing(worker) : [];
+    const checkoutMode = "guest";
+    const guestIncomplete = guestMissing(worker);
     const fulfillment = worker.fulfillment || "pickup";
-    const note = worker.last_message || (checkoutMode === "guest"
-      ? (guestReady(worker)
-        ? "訪客資料已填妥並已儲存。可以撳「開始運作」或上面綠色「全部開始搶機」。"
-        : "訪客模式：填妥個人同信用卡資料後，撳「儲存此 Worker」就可以開始運作。唔使登入 Apple ID。")
-      : (loggedIn
-        ? "已登入。可以撳「開始運作」或上面綠色「全部開始搶機」。"
-        : "未登入。請先撳「登入 Apple ID」。"));
-    const sessionHint = `會儲存在專案資料夾 sessions/${worker.session_dir || "session_worker_1"}。Chromium 把 Apple ID cookie 寫入呢度，下次開同一個資料夾就記得登入。`;
-    const meta = `${worker.sku || "未揀 SKU"} · ${checkoutMode === "guest" ? "訪客" : (loggedIn ? (email || "已登入") : "未登入")} · ${fulfillment === "delivery" ? "送貨" : "自取"}`;
+    const note = worker.last_message || (guestReady(worker)
+      ? "訪客資料已填妥並已儲存。可以撳「開始運作」或上面綠色「全部開始搶機」。"
+      : "填妥個人同信用卡資料後，撳「儲存此 Worker」就可以開始運作。唔使登入 Apple ID。");
+    const sessionHint = `瀏覽器資料會放喺 sessions/${worker.session_dir || "session_guest_1"}。開始運作、等貨嗰陣會先清購物袋；有貨加車就唔會再繞去購物袋。`;
+    const meta = `${worker.sku || "未揀 SKU"} · 訪客 · ${fulfillment === "delivery" ? "送貨" : "自取"}`;
     return `
       <article class="worker-card${entering ? " enter" : ""}${sniping ? " is-sniping" : ""}${closed ? " is-closed" : ""}${collapsed ? " is-collapsed" : ""}" data-id="${esc(worker.id)}" data-status="${esc(status)}" data-message="${esc(worker.last_message || "")}" data-purchased="${esc(worker.purchased || 0)}" data-sniping="${sniping}" data-logged-in="${loggedIn}" data-checkout="${esc(checkoutMode)}" data-fulfillment="${esc(fulfillment)}">
         <div class="worker-top">
@@ -721,11 +711,6 @@
           </div>
         </div>
         <div class="worker-body">
-        <div class="account-bar ${loggedIn ? "is-in" : "is-out"}">
-          <span>Apple ID</span>
-          <strong class="account-email">${loggedIn ? esc(email || "已登入") : "未登入"}</strong>
-          <button type="button" class="btn login">${closed ? "重新打開瀏覽器" : (loggedIn ? "帶到最前" : "登入 Apple ID")}</button>
-        </div>
         <p class="worker-note${closed ? " warn" : ""}">${esc(note)}</p>
         <div class="grid">
           <label class="field">
@@ -733,22 +718,15 @@
             <input class="name" type="text" value="${esc(worker.name)}" />
           </label>
           <label class="field">
-            <span>結帳模式 (Checkout Mode)</span>
-            <select class="checkout-mode">
-              <option value="apple_id" ${checkoutMode === "apple_id" ? "selected" : ""}>Apple ID 登入模式</option>
-              <option value="guest" ${checkoutMode === "guest" ? "selected" : ""}>訪客 (Guest) 模式</option>
-            </select>
-          </label>
-          <label class="field">
             <span>取貨方式 (Fulfillment)</span>
             <select class="fulfillment">
-              <option value="pickup" ${fulfillment === "pickup" ? "selected" : ""}>門市自取 (Store Pickup)</option>
-              <option value="delivery" ${fulfillment === "delivery" ? "selected" : ""}>送貨上門 (Home Delivery)</option>
+              <option value="pickup" ${fulfillment === "pickup" ? "selected" : ""}>訪客 · 門市自取</option>
+              <option value="delivery" ${fulfillment === "delivery" ? "selected" : ""}>訪客 · 送貨上門</option>
             </select>
           </label>
           <label class="field session-field">
-            <span>Apple ID Session 資料夾</span>
-            <input class="session" type="text" value="${esc(worker.session_dir)}" placeholder="session_worker_1" />
+            <span>瀏覽器資料夾</span>
+            <input class="session" type="text" value="${esc(worker.session_dir)}" placeholder="session_guest_1" />
             <p class="help session-path">${esc(sessionHint)}</p>
           </label>
           <div class="field full guest-fields">
@@ -796,7 +774,7 @@
           <label class="field full">
             <span>購買數量上限（此 Worker 全部門市合計）</span>
             <input class="qty" type="number" min="1" max="99" value="${esc(worker.max_qty)}" />
-            <p class="help">複選 ifc + 沙田、上限填 2：最多搶 2 部（例如購物袋一次揀 2，或分兩次）。唔係每間門市各 2 部。加車入袋後會喺數量下拉揀呢個剩餘數量。Apple 同一型號通常每人最多 2 部。同一個 Apple ID 開多個 Worker 會各自再計一次上限。</p>
+            <p class="help">複選 ifc + 沙田、上限填 2：最多搶 2 部（例如購物袋一次揀 2，或分兩次）。唔係每間門市各 2 部。等貨嗰陣會先清走購物袋舊貨。Apple 同一型號通常每人最多 2 部。</p>
           </label>
         </div>
         <div class="card-save">
@@ -865,19 +843,15 @@
     }
     const loginBtn = card.querySelector(".login");
     if (loginBtn) {
-      loginBtn.textContent = closed ? "重新打開瀏覽器" : (loggedIn ? "帶到最前" : "登入 Apple ID");
+      loginBtn.textContent = closed ? "重新打開瀏覽器" : "帶到最前";
       loginBtn.disabled = sniping;
     }
     const note = card.querySelector(".worker-note");
     if (note) {
       note.classList.toggle("warn", closed);
-      note.textContent = worker.last_message || (isGuestMode(worker)
-        ? (guestReady(worker)
-          ? "訪客資料已填妥並已儲存。可以撳「開始運作」或上面綠色「全部開始搶機」。"
-          : "訪客模式：填妥個人同信用卡資料後，撳「儲存此 Worker」就可以開始運作。唔使登入 Apple ID。")
-        : (loggedIn
-          ? "已登入。可以撳「開始運作」或上面綠色「全部開始搶機」。"
-          : "未登入。請先撳「登入 Apple ID」。"));
+      note.textContent = worker.last_message || (guestReady(worker)
+        ? "訪客資料已填妥並已儲存。可以撳「開始運作」或上面綠色「全部開始搶機」。"
+        : "填妥個人同信用卡資料後，撳「儲存此 Worker」就可以開始運作。唔使登入 Apple ID。");
     }
     const cardStatus = card.querySelector(".guest-card-status");
     if (cardStatus) cardStatus.textContent = guestCardStatusText(worker.guest || {});
@@ -901,9 +875,7 @@
     }
     const meta = card.querySelector(".collapsed-meta");
     if (meta) {
-      const guestBit = isGuestMode(worker)
-        ? (guestReady(worker) ? "訪客已填妥" : "訪客")
-        : (loggedIn ? (worker.apple_id || "已登入") : "未登入");
+      const guestBit = guestReady(worker) ? "訪客已填妥" : "訪客";
       const fulfillBit = isDelivery(worker) ? "送貨" : "自取";
       meta.textContent = `${worker.sku || "未揀 SKU"} · ${guestBit} · ${fulfillBit}`;
     }
@@ -1049,18 +1021,12 @@
       window.alert("此 Worker 要有名稱同目標機型。");
       return false;
     }
-    if (!isGuestMode(worker) && !worker.session_dir) {
-      window.alert("Apple ID 模式必須填寫 Session 資料夾路徑。");
+    const missing = guestMissing(worker);
+    if (missing.length) {
+      window.alert(`訪客模式請填妥：${missing.join("、")}`);
       return false;
     }
-    if (isGuestMode(worker)) {
-      const missing = guestMissing(worker);
-      if (missing.length) {
-        window.alert(`訪客模式請填妥：${missing.join("、")}`);
-        return false;
-      }
-      if (!worker.session_dir) worker.session_dir = `session_guest_${worker.id}`;
-    }
+    if (!worker.session_dir) worker.session_dir = `session_guest_${worker.id}`;
     if (!isDelivery(worker) && !(worker.stores || []).length) {
       window.alert("門市自取必須至少揀一間香港門市。");
       return false;
@@ -1121,12 +1087,6 @@
     const unsaved = unsavedWorkers();
     if (unsaved.length) {
       window.alert(`請先喺未儲存嘅卡撳「儲存此 Worker」：${unsaved.map((item) => item.name).join("、")}`);
-      updateStartGate();
-      return;
-    }
-    const unlogged = unloggedWorkers();
-    if (unlogged.length) {
-      window.alert(`仲有 Apple ID 模式 Worker 未登入：${unlogged.map((item) => item.name).join("、")}。請登入，或者刪除未登入嘅 Worker。`);
       updateStartGate();
       return;
     }
@@ -1201,7 +1161,7 @@
       return;
     }
     if (isDirty(current)) {
-      window.alert("請先撳「儲存此 Worker」，再登入 Apple ID。");
+      window.alert("請先撳「儲存此 Worker」，再打開瀏覽器。");
       return;
     }
     if (state.previewMode) {
@@ -1240,14 +1200,9 @@
       window.alert("請先撳「儲存此 Worker」，再開始運作。");
       return;
     }
-    if (isGuestMode(worker)) {
-      const missing = guestMissing(worker);
-      if (missing.length) {
-        window.alert(`訪客模式請填妥：${missing.join("、")}`);
-        return;
-      }
-    } else if (!(worker.logged_in || worker.apple_id)) {
-      window.alert("請先撳「登入 Apple ID」，登入成功後先可以開始運作。");
+    const missing = guestMissing(worker);
+    if (missing.length) {
+      window.alert(`訪客模式請填妥：${missing.join("、")}`);
       return;
     }
     if (!confirmLiveStart()) return;

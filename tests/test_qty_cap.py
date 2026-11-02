@@ -2,8 +2,21 @@ from __future__ import annotations
 
 from bot.checkout import CheckoutResult
 from bot.inventory import StockMatch
-from bot.models import WorkerProfile
+from bot.models import GuestProfile, WorkerProfile
 from bot.worker import WATCH_HEARTBEAT_POLLS, Worker
+
+GUEST = GuestProfile(
+    last_name="Chan",
+    first_name="Tai Man",
+    email="chan@example.com",
+    phone="51234567",
+    address_street="中環金融街 8 號",
+    address_building="國際金融中心一期 15 樓 1501 室",
+    card_number="4111111111111111",
+    card_month="12",
+    card_year="2028",
+    cvv="123",
+)
 
 IFC = StockMatch(
     store_id="R428",
@@ -32,6 +45,7 @@ async def test_qty_cap_counts_all_selected_stores_together(monkeypatch) -> None:
         stores=["R428", "R610"],
         pickup_window="1d",
         max_qty=2,
+        guest=GUEST,
     )
     worker = Worker(profile, test_mode=True, playwright=None)
     worker.context = object()
@@ -76,7 +90,8 @@ def _guest_worker() -> Worker:
         stores=["R428"],
         pickup_window="1d",
         max_qty=1,
-        checkout_mode="apple_id",
+        checkout_mode="guest",
+        guest=GUEST,
     )
     worker = Worker(profile, test_mode=True, playwright=None)
     worker.context = object()

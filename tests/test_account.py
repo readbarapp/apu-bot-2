@@ -26,5 +26,4 @@ def test_signin_url_detection() -> None:
 def test_guest_mode_never_opens_shop_account() -> None:
     assert not should_open_account_page("guest", sniping=False)
     assert not should_open_account_page("guest", sniping=True)
-    assert should_open_account_page("apple_id", sniping=False)
-    assert not should_open_account_page("apple_id", sniping=True)
+    assert not should_open_account_page("apple_id", sniping=False)

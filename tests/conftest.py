@@ -43,7 +43,7 @@ class DummyWorker:
             "stores": self.profile.stores,
             "pickup_window": self.profile.pickup_window,
             "max_qty": self.profile.max_qty,
-            "checkout_mode": getattr(self.profile, "checkout_mode", "apple_id"),
+            "checkout_mode": "guest",
             "fulfillment": getattr(self.profile, "fulfillment", "pickup"),
             "delivery_max_days": getattr(self.profile, "delivery_max_days", 7),
             "guest": public_guest(self.profile.guest.model_dump()) if getattr(self.profile, "guest", None) else {},
@@ -68,13 +68,10 @@ class DummyWorker:
         self.apple_id = "tester@icloud.com"
         self.logged_in = True
         self.status = "ready"
-        self.last_message = "已登入 Apple ID：tester@icloud.com"
+        self.last_message = "訪客模式：資料已備好，可以開始運作。"
         self.focused += 1
 
     async def start_sniping(self) -> None:
-        guest = getattr(self.profile, "checkout_mode", "apple_id") == "guest"
-        if not guest and not self.logged_in and not self.apple_id:
-            raise RuntimeError("尚未登入 Apple ID，不能開始搶機")
         await self.ensure_browser()
         self.sniping = True
         self.status = "watching"
@@ -83,8 +80,7 @@ class DummyWorker:
 
     async def stop_sniping(self) -> None:
         self.sniping = False
-        guest = getattr(self.profile, "checkout_mode", "apple_id") == "guest"
-        self.status = "ready" if guest or self.logged_in or self.apple_id else "needs_login"
+        self.status = "ready"
         self.last_message = "已暫停搶購。撳「開始運作」即可再搶。"
 
     def mark_browser_closed(self) -> None:
