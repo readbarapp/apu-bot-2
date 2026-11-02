@@ -5,7 +5,7 @@ import re
 import time
 from dataclasses import dataclass, field
 
-from bot.catalogs import CHECKOUT_STEP_TIMEOUT_MS, bag_url, checkout_url, product_url
+from bot.catalogs import APPLE_LOCALE, CHECKOUT_STEP_TIMEOUT_MS, bag_url, checkout_url, product_url
 from bot.inventory import StockMatch, days_from_quote
 from bot.logs import hub
 from bot.models import GuestProfile
@@ -262,6 +262,45 @@ async def wait_if_checkout_blocked(page, timeout: int = 8000) -> bool:
     return checkout_is_blocked(getattr(page, "url", "") or "")
 
 
+def _response_looks_blocked(response) -> bool:
+    url = getattr(response, "url", "") or ""
+    status = int(getattr(response, "status", 0) or 0)
+    if status == 541 or checkout_is_blocked(url):
+        return True
+    if status >= 400 and re.search(r"add-to-cart|signInx|/shop/541", url, re.I):
+        return True
+    return False
+
+
+async def _open_bag(page) -> None:
+    url = getattr(page, "url", "") or ""
+    if checkout_stage(url) == "bag" and f"/{APPLE_LOCALE}/shop/bag" in url:
+        return
+    if re.search(r"/shop/bag", url, re.I) and f"/{APPLE_LOCALE}/" not in url:
+        await page.goto(bag_url(), wait_until="domcontentloaded", timeout=30_000)
+        return
+    locators = [
+        page.get_by_role("button", name=VIEW_BAG_PATTERN),
+        page.get_by_role("link", name=VIEW_BAG_PATTERN),
+        page.get_by_text(VIEW_BAG_PATTERN),
+    ]
+    for locator in locators:
+        try:
+            if await locator.count() == 0:
+                continue
+            await locator.first.click(timeout=4000)
+            try:
+                await page.wait_for_url(re.compile(r"/shop/bag", re.I), timeout=8000)
+            except Exception:
+                pass
+            break
+        except Exception:
+            continue
+    current = getattr(page, "url", "") or ""
+    if checkout_stage(current) != "bag" or f"/{APPLE_LOCALE}/" not in current:
+        await page.goto(bag_url(), wait_until="domcontentloaded", timeout=30_000)
+
+
 def _looks_unexpected(exc: Exception) -> bool:
     text = str(exc).lower()
     markers = (
@@ -327,6 +366,24 @@ async def _add_bag_enabled(page) -> bool:
         return bool(await locator.first.is_enabled())
     except Exception:
         return False
+
+
+async def _wait_for_configured_pdp(page) -> None:
+    """goto/product/SKU can briefly land on the family page before the colour/capacity URL."""
+    try:
+        await page.wait_for_url(
+            re.compile(r"/shop/(buy-[^/]+/[^/]+/.+|product/)", re.I),
+            timeout=12_000,
+        )
+    except Exception:
+        pass
+    try:
+        await page.get_by_role("button", name=ADD_BAG_PATTERN).first.wait_for(
+            state="visible",
+            timeout=8_000,
+        )
+    except Exception:
+        pass
 
 
 async def _decline_tradein_and_applecare(page) -> None:
@@ -446,6 +503,46 @@ async def _click_add_to_bag(page, timeout: int = 4000) -> bool:
     return False
 
 
+async def _complete_add_to_bag(page, timeout: int = 4000) -> str:
+    """Click add-to-bag and confirm Apple actually moved to attach/bag. blocked/ok/missed."""
+    saw_block = False
+
+    def on_response(response) -> None:
+        nonlocal saw_block
+        if _response_looks_blocked(response):
+            saw_block = True
+
+    listener = on_response
+    try:
+        page.on("response", on_response)
+    except Exception:
+        listener = None
+    clicked = await _click_add_to_bag(page, timeout=timeout)
+    if clicked:
+        try:
+            await page.wait_for_url(
+                re.compile(r"step=attach|/shop/bag|/shop/404|/shop/541|sorry", re.I),
+                timeout=10_000,
+            )
+        except Exception:
+            await asyncio.sleep(1.0)
+    if listener is not None:
+        try:
+            page.remove_listener("response", on_response)
+        except Exception:
+            pass
+    title = await page_title(page)
+    if (
+        saw_block
+        or checkout_is_blocked(getattr(page, "url", "") or "")
+        or re.search(r"page not found|找不到|很抱歉", title, re.I)
+    ):
+        return "blocked"
+    if checkout_stage(getattr(page, "url", "") or "") in {"attach", "bag"}:
+        return "ok"
+    return "missed"
+
+
 async def _on_place_order_step(page) -> bool:
     if checkout_stage(page.url) == "review":
         return True
@@ -456,32 +553,6 @@ async def _on_place_order_step(page) -> bool:
         return await locator.first.is_visible()
     except Exception:
         return False
-
-
-async def _open_bag(page) -> None:
-    if checkout_stage(page.url) == "bag":
-        return
-    locators = [
-        page.get_by_role("button", name=VIEW_BAG_PATTERN),
-        page.get_by_role("link", name=VIEW_BAG_PATTERN),
-        page.get_by_text(VIEW_BAG_PATTERN),
-        page.locator('[data-autom*="bag" i]'),
-    ]
-    for locator in locators:
-        try:
-            if await locator.count() == 0:
-                continue
-            await locator.first.click(timeout=4000)
-            try:
-                await page.wait_for_url(re.compile(r"/shop/bag", re.I), timeout=8000)
-            except Exception:
-                pass
-            if checkout_stage(page.url) == "bag":
-                return
-        except Exception:
-            continue
-    if checkout_stage(page.url) != "bag":
-        await page.goto(bag_url(), wait_until="domcontentloaded", timeout=30_000)
 
 
 async def _set_bag_quantity(page, quantity: int) -> int:
@@ -777,10 +848,11 @@ async def run_checkout(
         where = match.store_name if fulfillment == "pickup" else f"送貨 {delivery_max_days} 日內"
         hub.info(worker_name, f"開始搶購 {sku}（{where}）")
         await page.goto(product_url(sku), wait_until="domcontentloaded", timeout=45_000)
+        await _wait_for_configured_pdp(page)
         if await _stopped(stop_event):
             return timer.result(False, "stopped")
 
-        hub.info(worker_name, "產品頁已開，先揀不換購同無 AppleCare+，再開加車")
+        hub.info(worker_name, f"產品頁已開（{page.url}），先揀不換購同無 AppleCare+，再開加車")
         await _decline_tradein_and_applecare(page)
 
         deadline = asyncio.get_running_loop().time() + 45
@@ -788,18 +860,19 @@ async def run_checkout(
         while asyncio.get_running_loop().time() < deadline:
             if await _stopped(stop_event):
                 return timer.result(False, "stopped")
-            if await _click_add_to_bag(page, timeout=4000):
-                if await wait_if_checkout_blocked(page):
-                    hub.error(
-                        worker_name,
-                        block_report(
-                            "加車",
-                            page.url,
-                            await page_title(page),
-                            "加車掣已撳但跳咗 404/541，未入到購物袋。唔好連撳。可改用平時 Chrome 人手試同一款。",
-                        ),
-                    )
-                    return timer.result(False, "add_to_bag_blocked", pause=True)
+            outcome = await _complete_add_to_bag(page, timeout=4000)
+            if outcome == "blocked":
+                hub.error(
+                    worker_name,
+                    block_report(
+                        "加車",
+                        page.url,
+                        await page_title(page),
+                        "加車掣已撳但跳咗 404/541，未入到購物袋。唔好連撳。可改用平時 Chrome 人手試同一款。",
+                    ),
+                )
+                return timer.result(False, "add_to_bag_blocked", pause=True)
+            if outcome == "ok":
                 added = True
                 break
             await _decline_tradein_and_applecare(page)
