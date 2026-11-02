@@ -5,7 +5,15 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from bot.inventory import days_from_quote, matches_window, parse_pickup_payload, pickup_url
+from bot.inventory import (
+    INVENTORY_BLOCK_PAUSE_AFTER,
+    backoff_seconds,
+    days_from_quote,
+    is_rate_limited,
+    matches_window,
+    parse_pickup_payload,
+    pickup_url,
+)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "pickup_mixed.json"
 HK = ZoneInfo("Asia/Hong_Kong")
@@ -71,3 +79,13 @@ def test_parse_payload_honours_store_and_pickup_window() -> None:
         now=NOW,
     )
     assert ignored_store == []
+
+
+def test_inventory_541_is_rate_limited_and_backs_off() -> None:
+    assert is_rate_limited(541)
+    assert is_rate_limited(429)
+    assert not is_rate_limited(200)
+    assert backoff_seconds(1) == 12
+    assert backoff_seconds(2) == 24
+    assert backoff_seconds(3) == 48
+    assert INVENTORY_BLOCK_PAUSE_AFTER == 4

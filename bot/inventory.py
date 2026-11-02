@@ -254,6 +254,9 @@ def parse_pickup_payload(
     return matches
 
 
+INVENTORY_BLOCK_PAUSE_AFTER = 4
+
+
 def is_rate_limited(status: int) -> bool:
     return status in {429, 503, 541}
 
