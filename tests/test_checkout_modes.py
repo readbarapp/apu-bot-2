@@ -344,3 +344,5 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "無 AppleCare+" in readme
     assert "以訪客身份繼續" in readme
     assert "signInx" in readme
+    assert "本機 Google Chrome" in readme
+    assert "屋企 IP 都被當 bot" in readme

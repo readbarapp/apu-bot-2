@@ -120,7 +120,9 @@ playwright install chromium
 
 **意思：**  
 - `pip install`：裝 FastAPI、Playwright 等 Python 套件（控制台同自動化瀏覽器）。  
-- `playwright install chromium`：另外下載一個專用 Chrome（Chromium），之後每個 Worker 會開呢個瀏覽器去 Apple 網站。可能要幾分鐘，等佢自己完成。
+- `playwright install chromium`：下載一個備用 Chromium。Worker **會優先用你部機已裝嘅 Google Chrome**，冇就試 Microsoft Edge，再冇先用呢個備用 Chromium。可能要幾分鐘，等佢自己完成。
+
+建議另外裝正式版 [Google Chrome](https://www.google.com/chrome/)。聽朝喺屋企跑時，用本機 Chrome 比 Playwright 內建瀏覽器更似平時上網，比較唔容易被當 bot。
 
 ---
 
@@ -239,7 +241,20 @@ Bot 而家會撳 `data-autom="guest-checkout-btn"`（「以訪客身份繼續」
 - **成功：** 購物袋有貨 → 去到「登入以快速完成結帳」→ 撳訪客之後入到揀送貨／取貨、填姓名地址卡。Live Log 會出效能實測報告，測試模式停在付款前。
 - **仍然 541：** 撳加車或「以訪客身份繼續」之後頁面變「找不到你想去的網頁」，Live Log 會寫官網拒絕訪客結帳。呢個係 Apple 風控，唔係掣認錯。
 
-Chromium 會用你本機嘅有頭視窗、香港時區，並收埋 Playwright 預設嘅 `webdriver`／`--enable-automation` 標記，減少屋企機被誤判。
+瀏覽器會用你本機嘅有頭視窗、香港時區，優先開 **本機 Google Chrome**（冇就 Edge，再冇先用 Playwright Chromium），並收埋 Playwright 預設嘅 `webdriver`／`--enable-automation` 標記。Live Log 會寫用咗邊個瀏覽器。
+
+### 屋企 IP 都被當 bot／仍然 541，我可以點做？
+
+Playwright 就算喺家用網絡，都可能帶自動化痕跡。按呢個次序試，一次改一樣：
+
+1. **裝正式版 Google Chrome**（[google.com/chrome](https://www.google.com/chrome/)），然後重新撳登入或開始運作。Live Log 應該寫「已用本機 Google Chrome」。如果寫緊 Playwright Chromium，即係未搵到 Chrome。
+2. **關 VPN、加速器、公司代理、Clash 等。** 用香港家用寬頻。VPN 出口好似機房 IP，好容易 541。
+3. **測試模式只開 1 個 Worker。** 開太多連庫存查詢都會 541。
+4. **541 之後唔好即刻再撳訪客／加車。** 暫停嗰張卡，等幾分鐘。連續撞風控會越擋越實。
+5. **用手機熱點對照一次。** 熱點得、寬頻唔得：寬頻 IP 被標記。兩個都 541：確認 Live Log 係本機 Chrome，而唔係備用 Chromium。
+6. Bot 用獨立 `sessions\` 資料夾，**唔會**開你平時嗰個已登入 Chrome 用戶檔，避免同日常瀏覽器搶檔。
+
+自動化唔可能 100% 扮成人手。以上係降低屋企機被誤判嘅實際步驟，唔係保證。
 
 ### `pip install` 話要 Microsoft Visual C++ / Failed building wheel for pyyaml？
 
@@ -395,7 +410,7 @@ preview.html            唔使 Python 都可以用瀏覽器睇個樣
 bot/catalogs.py         香港門市、iPhone Duo SKU、取貨天數
 bot/account.py          從商店頁偵測已登入 Apple ID 電郵
 bot/inventory.py        Apple /retail/pickup-message 庫存解析
-bot/worker.py           登入 / 待命 / 開始或停止搶購、持久化 Chromium
+bot/worker.py           登入 / 待命 / 開始或停止搶購、持久化 Chrome／Chromium
 bot/checkout.py         加車／結帳／自取或送貨／訪客填表；測試模式停在最後一步並輸出計時
 bot/secrets.py          本機加密訪客敏感資料
 bot/manager.py          單一 Worker 登入／暫停／繼續、全部開始搶機、緊急停止
