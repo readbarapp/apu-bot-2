@@ -421,6 +421,7 @@ class Worker:
                     level="success",
                 )
                 try:
+                    remaining = max(1, self.profile.max_qty - self.purchased)
                     result = await run_checkout(
                         await self._page(),
                         sku=self.profile.sku,
@@ -432,6 +433,7 @@ class Worker:
                         fulfillment=self.profile.fulfillment,
                         guest=self.profile.guest if self.profile.checkout_mode == "guest" else None,
                         delivery_max_days=self.profile.delivery_max_days,
+                        quantity=remaining,
                     )
                 except Exception as exc:
                     if is_browser_closed_error(exc):
@@ -444,7 +446,7 @@ class Worker:
                     return
                 if result.ok:
                     # One worker-wide counter for every selected store combined.
-                    self.purchased += 1
+                    self.purchased += max(1, result.quantity)
                     if result.reason == "dry_run":
                         self._set(
                             "dry_run_paused" if self.purchased >= self.profile.max_qty else "watching",

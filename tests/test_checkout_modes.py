@@ -6,21 +6,28 @@ import pytest
 
 from bot.checkout import (
     ADD_BAG_PATTERN,
+    CHECKOUT_PATTERN,
+    CONTINUE_PATTERN,
+    CREDIT_CARD_PATTERN,
     CheckoutResult,
     GUEST_PATTERN,
     INTERRUPT_MESSAGE,
     NO_APPLECARE_PATTERN,
     NO_TRADEIN_PATTERN,
+    REVIEW_ORDER_PATTERN,
     SKIP_PATTERN,
+    VIEW_BAG_PATTERN,
     _click_add_to_bag,
     _continue_as_guest,
     _decline_tradein_and_applecare,
     _fill_card_expiry,
     _fill_guest,
+    _set_bag_quantity,
     block_report,
     card_month_options,
     card_year_options,
     checkout_is_blocked,
+    checkout_stage,
     mm_yy,
     wait_if_checkout_blocked,
 )
@@ -54,7 +61,9 @@ SAMPLE_GUEST = {
         "first_name": "Tai Man",
         "email": "chan@example.com",
         "phone": "51234567",
-        "address": "1 IFC, Central, Hong Kong",
+        "address": "中環金融街 8 號",
+        "address_street": "中環金融街 8 號",
+        "address_building": "國際金融中心一期 15 樓 1501 室",
         "card_number": "4111111111111111",
         "card_month": "12",
         "card_year": "2028",
@@ -76,7 +85,25 @@ def test_guest_profile_lists_every_empty_field() -> None:
     assert "信用卡號碼" in missing
     assert "有效月份" in missing
     assert "CVV 安全碼" in missing
+    assert "街道地址" in "".join(missing)
+    assert "屋苑或大廈" in "".join(missing)
     assert "英文姓氏" not in missing
+
+
+def test_legacy_address_copies_into_street_line() -> None:
+    guest = GuestProfile(
+        last_name="Chan",
+        first_name="Tai Man",
+        email="chan@example.com",
+        phone="51234567",
+        address="中環金融街 8 號",
+        card_number="4111111111111111",
+        card_month="12",
+        card_year="2028",
+        cvv="123",
+    )
+    assert guest.address_street == "中環金融街 8 號"
+    assert "屋苑或大廈" in "".join(guest.missing_labels())
 
 
 def test_card_expiry_prefers_two_digit_year_for_apple_mm_yy() -> None:
@@ -101,6 +128,12 @@ class _FakeExpiryHandle:
     async def wait_for(self, **_kwargs) -> None:
         if self._kind not in self._page.fields:
             raise RuntimeError("missing")
+
+    async def count(self) -> int:
+        return 1 if self._kind in self._page.fields else 0
+
+    async def click(self, **_kwargs) -> None:
+        return None
 
     async def evaluate(self, _script: str) -> str:
         return self._tag
@@ -144,6 +177,12 @@ class _FakeExpiryPage:
         return handle or _FakeExpiryHandle(self, "missing")
 
     def get_by_placeholder(self, pattern):
+        return self.get_by_label(pattern)
+
+    def get_by_role(self, _role, name=None):
+        return self.get_by_label(name or _role)
+
+    def get_by_text(self, pattern):
         return self.get_by_label(pattern)
 
     def locator(self, selector: str):
@@ -198,7 +237,8 @@ async def test_fill_guest_does_not_type_four_digit_year_into_mm_yy() -> None:
         first_name="Tai Man",
         email="chan@example.com",
         phone="51234567",
-        address="1 IFC",
+        address_street="中環金融街 8 號",
+        address_building="國際金融中心一期 15 樓 1501 室",
         card_number="4111111111111111",
         card_month="12",
         card_year="2028",
@@ -440,6 +480,65 @@ def test_product_option_patterns_match_current_apple_hk_labels() -> None:
     assert ADD_BAG_PATTERN.search("加入購物袋")
     assert ADD_BAG_PATTERN.search("Add to Bag") is not None
     assert not ADD_BAG_PATTERN.search("使用 Apple Pay 結帳")
+    assert VIEW_BAG_PATTERN.search("查看購物袋")
+    assert CHECKOUT_PATTERN.search("結帳")
+    assert not CHECKOUT_PATTERN.search("使用 Apple Pay 結帳")
+    assert CONTINUE_PATTERN.search("繼續前往付款")
+    assert CREDIT_CARD_PATTERN.search("信用卡或扣帳卡")
+    assert REVIEW_ORDER_PATTERN.search("檢查你的訂單")
+
+
+def test_checkout_stage_follows_iphone_guest_pickup_urls() -> None:
+    assert checkout_stage(
+        "https://www.apple.com/hk-zh/shop/buy-iphone/iphone-17e?product=mhrv4za/a&step=attach"
+    ) == "attach"
+    assert checkout_stage("https://www.apple.com/hk-zh/shop/bag") == "bag"
+    assert checkout_stage(
+        "https://secure6.store.apple.com/hk-zh/shop/signIn?ssi=abc"
+    ) == "signin"
+    assert checkout_stage(
+        "https://secure6.store.apple.com/hk-zh/shop/checkout?_s=Fulfillment-init"
+    ) == "fulfillment"
+    assert checkout_stage(
+        "https://secure6.store.apple.com/hk-zh/shop/checkout?_s=PickupContact-init"
+    ) == "contact"
+    assert checkout_stage(
+        "https://secure6.store.apple.com/hk-zh/shop/checkout?_s=Billing-init"
+    ) == "billing"
+
+
+class _FakeQtyHandle:
+    def __init__(self, page: "_FakeQtyPage") -> None:
+        self._page = page
+        self.first = self
+
+    async def wait_for(self, **_kwargs) -> None:
+        return None
+
+    async def select_option(self, value=None, label=None, **_kwargs) -> None:
+        candidate = value or label
+        if candidate not in self._page.options:
+            raise RuntimeError("no option")
+        self._page.selected = candidate
+
+
+class _FakeQtyPage:
+    def __init__(self, options: list[str]) -> None:
+        self.options = options
+        self.selected = "1"
+
+    def locator(self, _selector: str) -> _FakeQtyHandle:
+        return _FakeQtyHandle(self)
+
+    def get_by_label(self, _pattern) -> _FakeQtyHandle:
+        return _FakeQtyHandle(self)
+
+
+@pytest.mark.asyncio
+async def test_bag_quantity_selects_two() -> None:
+    page = _FakeQtyPage(["1", "2"])
+    assert await _set_bag_quantity(page, 2) == 2
+    assert page.selected == "2"
 
 
 class _FakeHandle:
@@ -554,6 +653,9 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "slice(-2)" in js
     assert "唔會填 12/2028" in js
     assert "MM/YY" in js
+    assert "guest-address-street" in js
+    assert "guest-address-building" in js
+    assert "屋苑或大廈" in js
     assert "請選擇" in js
     assert 'card_month: ""' in js
     assert "digits.length < 3" in js
@@ -581,3 +683,8 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "唔會填 12/2028" in readme
     assert "訪客資料已修改成功" in readme
     assert "MM/YY" in readme
+    assert "查看購物袋" in readme
+    assert "繼續前往付款" in readme
+    assert "信用卡或扣帳卡" in readme
+    assert "檢查你的訂單" in readme
+    assert "使用 Apple Pay 結帳" in readme
