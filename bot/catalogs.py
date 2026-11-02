@@ -41,11 +41,20 @@ PICKUP_WINDOWS: list[dict[str, str | int]] = [
 
 PICKUP_WINDOW_BY_ID = {item["id"]: item for item in PICKUP_WINDOWS}
 
+DELIVERY_WINDOWS: list[dict[str, str | int]] = [
+    {"id": "3", "label": "3 日內送到", "max_days": 3},
+    {"id": "5", "label": "5 日內送到", "max_days": 5},
+    {"id": "7", "label": "7 日內送到", "max_days": 7},
+    {"id": "10", "label": "10 日內送到", "max_days": 10},
+    {"id": "14", "label": "14 日內送到", "max_days": 14},
+]
+
 def catalog_payload() -> dict:
     return {
         "stores": STORES,
         "products": PRODUCTS,
         "pickup_windows": PICKUP_WINDOWS,
+        "delivery_windows": DELIVERY_WINDOWS,
         "poll_seconds": POLL_SECONDS,
         "apple_origin": APPLE_ORIGIN,
         "apple_locale": APPLE_LOCALE,

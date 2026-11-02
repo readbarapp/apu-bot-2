@@ -4,7 +4,8 @@ import asyncio
 from typing import Any
 
 from bot.logs import hub
-from bot.models import StartRequest, WorkerProfile
+from bot.models import GuestProfile, StartRequest, WorkerProfile
+from bot.secrets import merge_guest_payload, public_guest
 from bot.worker import Worker
 
 
@@ -42,6 +43,10 @@ class BotManager:
                     "stores": item.stores,
                     "pickup_window": item.pickup_window,
                     "max_qty": item.max_qty,
+                    "checkout_mode": item.checkout_mode,
+                    "fulfillment": item.fulfillment,
+                    "delivery_max_days": item.delivery_max_days,
+                    "guest": public_guest(item.guest.model_dump()),
                     "purchased": 0,
                     "status": "needs_login",
                     "last_message": "",
@@ -64,6 +69,16 @@ class BotManager:
         from playwright.async_api import async_playwright
 
         self._playwright = await async_playwright().start()
+
+    def _hydrate(self, profile: WorkerProfile) -> WorkerProfile:
+        if profile.checkout_mode != "guest":
+            return profile
+        merged = merge_guest_payload(profile.id, profile.guest.model_dump())
+        guest = GuestProfile.model_validate(merged)
+        missing = guest.missing_labels()
+        if missing:
+            raise EngineError(f"訪客模式請填妥：{'、'.join(missing)}", 400)
+        return profile.model_copy(update={"guest": guest})
 
     async def _upsert(self, profile: WorkerProfile, test_mode: bool) -> Worker:
         await self._ensure_playwright()
@@ -91,13 +106,13 @@ class BotManager:
 
     async def login_worker(self, profile: WorkerProfile, test_mode: bool) -> dict:
         self.test_mode = test_mode
-        worker = await self._upsert(profile, test_mode)
+        worker = await self._upsert(self._hydrate(profile), test_mode)
         await worker.open_login()
         return self.status()
 
     async def run_worker(self, profile: WorkerProfile, test_mode: bool) -> dict:
         self.test_mode = test_mode
-        worker = await self._upsert(profile, test_mode)
+        worker = await self._upsert(self._hydrate(profile), test_mode)
         try:
             await worker.start_sniping()
         except RuntimeError as exc:
@@ -123,7 +138,10 @@ class BotManager:
         ready: list[Worker] = []
         pending: list[str] = []
         for profile in request.workers:
-            worker = await self._upsert(profile, request.test_mode)
+            worker = await self._upsert(self._hydrate(profile), request.test_mode)
+            if worker.profile.checkout_mode == "guest":
+                ready.append(worker)
+                continue
             if not worker.logged_in and not worker.apple_id and worker.context is not None:
                 try:
                     await worker.refresh_account()

@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from bot.manager import manager  # noqa: E402
+from bot.secrets import public_guest  # noqa: E402
 
 
 class DummyWorker:
@@ -42,6 +43,10 @@ class DummyWorker:
             "stores": self.profile.stores,
             "pickup_window": self.profile.pickup_window,
             "max_qty": self.profile.max_qty,
+            "checkout_mode": getattr(self.profile, "checkout_mode", "apple_id"),
+            "fulfillment": getattr(self.profile, "fulfillment", "pickup"),
+            "delivery_max_days": getattr(self.profile, "delivery_max_days", 7),
+            "guest": public_guest(self.profile.guest.model_dump()) if getattr(self.profile, "guest", None) else {},
             "purchased": self.purchased,
             "status": self.status,
             "last_message": self.last_message,
@@ -67,7 +72,8 @@ class DummyWorker:
         self.focused += 1
 
     async def start_sniping(self) -> None:
-        if not self.logged_in and not self.apple_id:
+        guest = getattr(self.profile, "checkout_mode", "apple_id") == "guest"
+        if not guest and not self.logged_in and not self.apple_id:
             raise RuntimeError("尚未登入 Apple ID，不能開始搶機")
         await self.ensure_browser()
         self.sniping = True
@@ -77,7 +83,8 @@ class DummyWorker:
 
     async def stop_sniping(self) -> None:
         self.sniping = False
-        self.status = "ready" if (self.logged_in or self.apple_id) else "needs_login"
+        guest = getattr(self.profile, "checkout_mode", "apple_id") == "guest"
+        self.status = "ready" if guest or self.logged_in or self.apple_id else "needs_login"
         self.last_message = "已暫停搶購。撳「開始運作」即可再搶。"
 
     def mark_browser_closed(self) -> None:

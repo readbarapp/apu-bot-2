@@ -58,6 +58,15 @@ async def stop() -> dict:
     return await manager.stop()
 
 
+@app.post("/api/workers/secrets")
+async def save_worker_secrets(payload: WorkerActionRequest) -> dict:
+    try:
+        manager._hydrate(payload.worker)
+        return {"ok": True, "id": payload.worker.id}
+    except EngineError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
 @app.post("/api/workers/login")
 async def login_worker(payload: WorkerActionRequest) -> dict:
     try:
