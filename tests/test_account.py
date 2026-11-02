@@ -1,4 +1,5 @@
 from bot.account import cookies_indicate_apple_login, extract_email_from_text, looks_like_signin
+from bot.worker import should_open_account_page
 
 
 def test_extract_email_ignores_apple_system_addresses() -> None:
@@ -20,3 +21,10 @@ def test_signin_url_detection() -> None:
     assert looks_like_signin("https://secure.store.apple.com/hk/shop/signIn")
     assert looks_like_signin("https://appleid.apple.com/auth/authenticate")
     assert not looks_like_signin("https://www.apple.com/hk-zh/shop/bag")
+
+
+def test_guest_mode_never_opens_shop_account() -> None:
+    assert not should_open_account_page("guest", sniping=False)
+    assert not should_open_account_page("guest", sniping=True)
+    assert should_open_account_page("apple_id", sniping=False)
+    assert not should_open_account_page("apple_id", sniping=True)

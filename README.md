@@ -342,6 +342,16 @@ Bot 會等畫面出現藍色 **「以訪客身份繼續」** 掣先撳（唔單�
 
 瀏覽器會用你本機嘅有頭視窗、香港時區，優先開 **本機 Google Chrome**（冇就 Edge，再冇先用 Playwright Chromium），並收埋 Playwright 預設嘅 `webdriver`／`--enable-automation` 標記。Windows 唔會再傳 `--no-sandbox`，避免頂部黃條擋住撳掣。Live Log 會寫用咗邊個瀏覽器。
 
+### 訪客模式一開始就去 `/shop/account`、畫面「找不到你想去的網頁」？
+
+訪客結帳**唔需要** Apple 帳戶頁。舊版會喺開瀏覽器之後去 `https://www.apple.com/hk-zh/shop/account` 探測登入，Apple 風控就會跳 404。而家訪客模式只開商店首頁，**唔會再開 /shop/account**。
+
+### 庫存接口被限制（HTTP 541），係咪 IP 被封？
+
+**唔一定永久封 IP。** 541 係 Apple 風控暫時拒絕呢條庫存查詢（同加車／訪客 541 同一類）。Live Log 會退避 12s → 24s → 48s，連續 4 次就自動暫停，避免越打越擋。
+
+暫停之後：等幾分鐘，確認只開 **1 個 Worker**、本機 Chrome、香港家用寬頻、冇 VPN。熱點得、寬頻唔得，先至比較似寬頻 IP 被標記。Duo 2TB 如果官網「暫無供應」，就算接口冇 541 都會一直輪詢，唔會加車。
+
 ### 屋企 IP 都被當 bot／仍然 541，我可以點做？
 
 Playwright 就算喺家用網絡，都可能帶自動化痕跡。按呢個次序試，一次改一樣：

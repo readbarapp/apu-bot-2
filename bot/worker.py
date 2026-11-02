@@ -19,6 +19,7 @@ from bot.catalogs import STORE_BY_ID
 from bot.checkout import INTERRUPT_MESSAGE, run_checkout
 from bot.secrets import public_guest
 from bot.inventory import (
+    INVENTORY_BLOCK_PAUSE_AFTER,
     backoff_seconds,
     is_rate_limited,
     next_poll_delay,
@@ -35,6 +36,11 @@ from bot.window import (
 
 ROOT = Path(__file__).resolve().parent.parent
 SESSIONS_ROOT = ROOT / "sessions"
+
+
+def should_open_account_page(checkout_mode: str, *, sniping: bool) -> bool:
+    """Guest checkout never needs /shop/account; probing it often 541/404s the IP."""
+    return checkout_mode != "guest" and not sniping
 
 
 CLOSED_ERROR_MARKERS = (
@@ -244,10 +250,10 @@ class Worker:
         page = self.context.pages[0] if self.context.pages else await self.context.new_page()
         await page.goto(shop_home_url(), wait_until="domcontentloaded", timeout=45_000)
         self.ready_event.set()
-        await self.refresh_account()
         if self.profile.checkout_mode == "guest":
             self._set("ready", "訪客模式：唔使登入 Apple ID。資料已備好，可以開始運作。")
             return
+        await self.refresh_account()
         if self.logged_in:
             label = self.apple_id or "已登入"
             self._set("ready", f"已登入 Apple ID：{label}。待命中，撳「全部開始搶機」或「開始運作」。")
@@ -260,7 +266,9 @@ class Worker:
         page = await self._page()
         email = await detect_apple_id(page)
         session = await has_apple_session(self.context)
-        if not email and not session and not self.sniping:
+        if not email and not session and should_open_account_page(
+            self.profile.checkout_mode, sniping=self.sniping
+        ):
             try:
                 await page.goto(account_url(), wait_until="domcontentloaded", timeout=30_000)
             except Exception:
@@ -406,10 +414,31 @@ class Worker:
                     blocks = 0
                 except RateLimited as exc:
                     blocks += 1
+                    if blocks >= INVENTORY_BLOCK_PAUSE_AFTER:
+                        self.sniping = False
+                        self.snipe_stop.set()
+                        try:
+                            await self.bring_to_front()
+                        except Exception:
+                            pass
+                        self._set(
+                            "paused",
+                            (
+                                f"庫存接口連續 {blocks} 次被擋（HTTP {exc.status}）。"
+                                "呢個係 Apple 風控暫時限制查詢，唔一定永久封 IP。"
+                                "已自動暫停，唔好再連打。等幾分鐘再用 1 個 Worker 試。"
+                            ),
+                            level="error",
+                        )
+                        return
                     wait_for = backoff_seconds(blocks)
                     self._set(
                         "watching",
-                        f"庫存接口被限制（HTTP {exc.status}），{wait_for:.0f}s 後重試",
+                        (
+                            f"庫存接口被限制（HTTP {exc.status}，Apple 風控），"
+                            f"{wait_for:.0f}s 後重試（第 {blocks}/{INVENTORY_BLOCK_PAUSE_AFTER} 次）。"
+                            "唔一定永久封 IP；連續撞會越擋越實。"
+                        ),
                         level="warn",
                     )
                     await asyncio.sleep(wait_for)
