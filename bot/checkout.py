@@ -44,6 +44,7 @@ GUEST_PATTERN = re.compile(
     r"以訪客身份繼續|訪客結帳|以訪客身份|Guest Checkout|Continue as Guest",
     re.I,
 )
+GUEST_BUTTON_PATTERN = re.compile(r"^以訪客身份繼續$|^Continue as Guest$", re.I)
 BLOCKED_URL_MARKERS = (
     "/shop/404",
     "/shop/go/404",
@@ -436,40 +437,101 @@ async def _click_visible_checkout(page, timeout: int = 8000) -> bool:
     return False
 
 
-async def _continue_as_guest(page, timeout: int = 8000) -> str | None:
+def _guest_click_targets(root) -> list:
+    """Prefer the visible blue「以訪客身份繼續」label; data-autom is optional on current Apple HK."""
+    return [
+        root.locator('[data-autom="guest-checkout-btn"], [data-autom="guest-checkout"], [data-autom="guestCheckout"]'),
+        root.locator(
+            '[id="signIn.guestLogin"], [id*="guestLogin" i], [name*="guestLogin" i], '
+            '[id*="guest-checkout" i], [id*="guestCheckout" i]'
+        ),
+        root.get_by_role("button", name=GUEST_BUTTON_PATTERN),
+        root.get_by_role("link", name=GUEST_BUTTON_PATTERN),
+        root.get_by_text(GUEST_BUTTON_PATTERN),
+        root.locator(
+            "button:has-text('以訪客身份繼續'), a:has-text('以訪客身份繼續'), "
+            "input[type='submit'][value='以訪客身份繼續'], input[type='button'][value='以訪客身份繼續']"
+        ),
+    ]
+
+
+def _guest_page_roots(page) -> list:
+    roots = [page]
+    try:
+        roots.extend(frame for frame in list(page.frames or []) if frame is not page)
+    except Exception:
+        pass
+    return roots
+
+
+async def _locator_is_visible(handle) -> bool:
+    try:
+        return bool(await handle.is_visible())
+    except Exception:
+        return False
+
+
+async def _click_guest_button(handle, timeout: int = 2500) -> None:
+    try:
+        await handle.scroll_into_view_if_needed(timeout=min(timeout, 2000))
+    except Exception:
+        pass
+    try:
+        await handle.click(timeout=timeout)
+        return
+    except Exception:
+        await handle.click(timeout=timeout, force=True)
+
+
+def guest_block_extra(reason: str) -> str:
+    if reason == "guest_button_missed":
+        return "畫面停喺登入牆，搵唔到「以訪客身份繼續」。"
+    return "撳咗以訪客身份繼續之後被擋。可改用 Apple ID 模式；唔好連撳訪客。"
+
+
+async def _continue_as_guest(page, timeout: int = 12000) -> str | None:
     """Click Apple's guest checkout button. None means continue; a string is a stop reason."""
     if checkout_is_blocked(page.url):
         return "guest_blocked"
     if not re.search(r"signIn", page.url, re.I):
         return None
-    locators = [
-        page.locator('[data-autom="guest-checkout-btn"]'),
-        page.get_by_role("button", name=GUEST_PATTERN),
-        page.get_by_role("link", name=GUEST_PATTERN),
-    ]
     clicked = False
     saw_block = False
 
     def on_response(response) -> None:
         nonlocal saw_block
         url = response.url
-        if response.status == 541 or "/shop/541" in url or "signInx" in url and response.status >= 400:
+        if response.status == 541 or "/shop/541" in url or ("signInx" in url and response.status >= 400):
             saw_block = True
 
     try:
         page.on("response", on_response)
     except Exception:
         on_response = None  # type: ignore[assignment]
-    for locator in locators:
+    deadline = asyncio.get_running_loop().time() + max(timeout / 1000, 0.05)
+    while not clicked and asyncio.get_running_loop().time() < deadline:
+        for root in _guest_page_roots(page):
+            for locator in _guest_click_targets(root):
+                try:
+                    handle = locator.first
+                    if not await _locator_is_visible(handle):
+                        continue
+                    await _click_guest_button(handle)
+                    clicked = True
+                    break
+                except Exception:
+                    continue
+            if clicked:
+                break
+        if not clicked:
+            await asyncio.sleep(0.25)
+    if on_response is not None:
         try:
-            if await locator.count() == 0:
-                continue
-            await locator.first.click(timeout=timeout)
-            clicked = True
-            break
+            page.remove_listener("response", on_response)
         except Exception:
-            continue
+            pass
     if clicked:
+        hub.info("checkout", "已撳「以訪客身份繼續」")
         try:
             await page.wait_for_url(
                 re.compile(r"checkout|fulfillment|shipping|pickup|404|sorry|541", re.I),
@@ -477,14 +539,13 @@ async def _continue_as_guest(page, timeout: int = 8000) -> str | None:
             )
         except Exception:
             await asyncio.sleep(1.2)
-    if on_response is not None:
-        try:
-            page.remove_listener("response", on_response)
-        except Exception:
-            pass
-    if saw_block or checkout_is_blocked(page.url) or re.search(r"signIn", page.url, re.I):
+        if saw_block or checkout_is_blocked(page.url) or re.search(r"signIn", page.url, re.I):
+            return "guest_blocked"
+        return None
+    if checkout_is_blocked(page.url):
         return "guest_blocked"
-    return None
+    hub.error("checkout", "搵唔到「以訪客身份繼續」")
+    return "guest_button_missed"
 
 
 async def _click_add_to_bag(page, timeout: int = 4000) -> bool:
@@ -927,7 +988,7 @@ async def run_checkout(
                         "訪客結帳",
                         page.url,
                         await page_title(page),
-                        "撳咗以訪客身份繼續之後被擋。可改用 Apple ID 模式；唔好連撳訪客。",
+                        guest_block_extra(blocked),
                     ),
                 )
                 return timer.result(False, blocked, pause=True)
@@ -958,7 +1019,7 @@ async def run_checkout(
                             "訪客結帳",
                             page.url,
                             await page_title(page),
-                            "撳咗以訪客身份繼續之後被擋。可改用 Apple ID 模式；唔好連撳訪客。",
+                            guest_block_extra(blocked),
                         ),
                     )
                     return timer.result(False, blocked, pause=True)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import pytest
@@ -48,6 +49,11 @@ def test_persistent_launch_hides_playwright_automation_flags() -> None:
     assert options["timezone_id"] == "Asia/Hong_Kong"
     assert options["extra_http_headers"]["Accept-Language"].startswith("zh-HK")
     assert "--enable-automation" in options["ignore_default_args"]
+    assert options["chromium_sandbox"] is (os.name == "nt")
+    if os.name == "nt":
+        assert "--no-sandbox" in options["ignore_default_args"]
+    else:
+        assert "--no-sandbox" not in options["ignore_default_args"]
     assert any("AutomationControlled" in arg for arg in options["args"])
     assert "channel" not in options
     assert "webdriver" in STEALTH_INIT_SCRIPT

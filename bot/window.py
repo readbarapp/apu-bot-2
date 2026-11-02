@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 # Playwright otherwise sets navigator.webdriver and --enable-automation, which
@@ -21,7 +22,13 @@ def persistent_launch_kwargs(
         "locale": "zh-HK",
         "timezone_id": "Asia/Hong_Kong",
         "extra_http_headers": {"Accept-Language": "zh-HK,zh;q=0.9,en;q=0.8"},
-        "ignore_default_args": ["--enable-automation"],
+        # Windows Chrome shows a yellow --no-sandbox infobar that can steal clicks.
+        "chromium_sandbox": os.name == "nt",
+        "ignore_default_args": (
+            ["--enable-automation", "--no-sandbox"]
+            if os.name == "nt"
+            else ["--enable-automation"]
+        ),
         "args": ["--disable-blink-features=AutomationControlled"],
     }
     if channel:

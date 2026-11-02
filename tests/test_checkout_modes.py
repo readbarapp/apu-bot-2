@@ -11,6 +11,7 @@ from bot.checkout import (
     CREDIT_CARD_PATTERN,
     CheckoutResult,
     DELIVERY_PATTERN,
+    GUEST_BUTTON_PATTERN,
     GUEST_PATTERN,
     INTERRUPT_MESSAGE,
     NO_APPLECARE_PATTERN,
@@ -21,6 +22,7 @@ from bot.checkout import (
     VIEW_BAG_PATTERN,
     _click_add_to_bag,
     _continue_as_guest,
+    guest_block_extra,
     _decline_tradein_and_applecare,
     _fill_card_expiry,
     _fill_guest,
@@ -378,6 +380,13 @@ def test_delivery_days_over_limit_is_detectable() -> None:
 
 def test_guest_continue_pattern_and_blocked_urls() -> None:
     assert GUEST_PATTERN.search("以訪客身份繼續")
+    assert GUEST_PATTERN.search("訪客結帳")
+    assert GUEST_BUTTON_PATTERN.search("以訪客身份繼續")
+    assert GUEST_BUTTON_PATTERN.search("Continue as Guest")
+    assert not GUEST_BUTTON_PATTERN.search("訪客結帳")
+    assert not GUEST_BUTTON_PATTERN.search("以訪客身份")
+    assert guest_block_extra("guest_button_missed").startswith("畫面停喺登入牆")
+    assert "被擋" in guest_block_extra("guest_blocked")
     assert checkout_is_blocked("https://www.apple.com/hk-zh/shop/404")
     assert checkout_is_blocked("https://secure9.store.apple.com/shop/go/404")
     assert checkout_is_blocked("https://www.apple.com/hk-zh/shop/sorry/message_generic")
@@ -386,17 +395,46 @@ def test_guest_continue_pattern_and_blocked_urls() -> None:
     )
 
 
+def _pattern_matches_guest_button(pattern) -> bool:
+    label = "以訪客身份繼續"
+    if hasattr(pattern, "search"):
+        return bool(pattern.search(label))
+    return str(pattern) == label
+
+
 class _FakeGuestPage:
-    def __init__(self, after_url: str) -> None:
+    def __init__(
+        self,
+        after_url: str,
+        *,
+        has_autom: bool = True,
+        has_button: bool = True,
+        frames: list | None = None,
+    ) -> None:
         self.url = "https://secure.store.apple.com/hk-zh/shop/signIn"
         self.after_url = after_url
         self.clicks: list[str] = []
+        self.has_autom = has_autom
+        self.has_button = has_button
+        self.frames = frames or []
 
     def locator(self, selector: str):
-        return _FakeGuestButton(self, selector)
+        clickable = self.has_button and (
+            ("guest-checkout-btn" in selector and self.has_autom)
+            or ("guest-checkout" in selector and self.has_autom)
+            or ("guestCheckout" in selector and self.has_autom)
+            or "以訪客身份繼續" in selector
+            or "guestLogin" in selector
+        )
+        return _FakeGuestButton(self, selector, clickable=clickable)
 
-    def get_by_role(self, *_args, **_kwargs):
-        return _FakeGuestButton(self, "role")
+    def get_by_role(self, role: str, name=None, **_kwargs):
+        clickable = self.has_button and role in {"button", "link"} and _pattern_matches_guest_button(name)
+        return _FakeGuestButton(self, f"role:{role}", clickable=clickable)
+
+    def get_by_text(self, pattern, **_kwargs):
+        clickable = self.has_button and _pattern_matches_guest_button(pattern)
+        return _FakeGuestButton(self, "text", clickable=clickable)
 
     def on(self, *_args, **_kwargs) -> None:
         return None
@@ -409,15 +447,28 @@ class _FakeGuestPage:
 
 
 class _FakeGuestButton:
-    def __init__(self, page: _FakeGuestPage, name: str) -> None:
+    def __init__(self, page: _FakeGuestPage, name: str, clickable: bool = False) -> None:
         self._page = page
         self._name = name
+        self._clickable = clickable
         self.first = self
 
     async def count(self) -> int:
-        return 1 if "guest-checkout-btn" in self._name else 0
+        return 1 if self._clickable else 0
+
+    async def is_visible(self) -> bool:
+        return self._clickable
+
+    async def wait_for(self, **_kwargs) -> None:
+        if not self._clickable:
+            raise TimeoutError(self._name)
+
+    async def scroll_into_view_if_needed(self, **_kwargs) -> None:
+        return None
 
     async def click(self, **_kwargs) -> None:
+        if not self._clickable:
+            raise TimeoutError(self._name)
         self._page.clicks.append(self._name)
         self._page.url = self._page.after_url
 
@@ -426,19 +477,60 @@ class _FakeGuestButton:
 async def test_continue_as_guest_detects_apple_404() -> None:
     page = _FakeGuestPage("https://www.apple.com/hk-zh/shop/404")
     assert await _continue_as_guest(page) == "guest_blocked"
-    assert page.clicks == ['[data-autom="guest-checkout-btn"]']
+    assert page.clicks[0].startswith('[data-autom="guest-checkout-btn"]')
 
 
 @pytest.mark.asyncio
 async def test_continue_as_guest_allows_real_checkout() -> None:
     page = _FakeGuestPage("https://secure.store.apple.com/hk-zh/shop/checkout/start")
     assert await _continue_as_guest(page) is None
+    assert page.clicks
 
 
 @pytest.mark.asyncio
 async def test_continue_as_guest_blocks_if_still_on_signin() -> None:
     page = _FakeGuestPage("https://secure.store.apple.com/hk-zh/shop/signIn?ssi=abc")
     assert await _continue_as_guest(page) == "guest_blocked"
+    assert page.clicks
+
+
+@pytest.mark.asyncio
+async def test_continue_as_guest_clicks_visible_label_without_data_autom() -> None:
+    page = _FakeGuestPage(
+        "https://secure.store.apple.com/hk-zh/shop/checkout?_s=Fulfillment-init",
+        has_autom=False,
+    )
+    assert await _continue_as_guest(page) is None
+    assert page.clicks
+    assert not any("guest-checkout-btn" in click for click in page.clicks)
+
+
+@pytest.mark.asyncio
+async def test_continue_as_guest_clicks_button_inside_iframe() -> None:
+    frame = _FakeGuestPage(
+        "https://secure.store.apple.com/hk-zh/shop/checkout/start",
+        has_autom=False,
+    )
+    page = _FakeGuestPage(
+        "https://secure.store.apple.com/hk-zh/shop/checkout/start",
+        has_button=False,
+        frames=[frame],
+    )
+    page.after_url = frame.after_url
+    assert await _continue_as_guest(page) is None
+    assert frame.clicks
+    assert page.url.endswith("/shop/checkout/start")
+
+
+@pytest.mark.asyncio
+async def test_continue_as_guest_reports_missed_button() -> None:
+    page = _FakeGuestPage(
+        "https://secure.store.apple.com/hk-zh/shop/signIn?ssi=abc",
+        has_autom=False,
+        has_button=False,
+    )
+    assert await _continue_as_guest(page, timeout=200) == "guest_button_missed"
+    assert page.clicks == []
 
 
 def test_block_report_is_copyable_without_reading_code() -> None:
@@ -705,6 +797,8 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "不換購" in readme
     assert "無 AppleCare+" in readme
     assert "以訪客身份繼續" in readme
+    assert "已撳「以訪客身份繼續」" in readme
+    assert "--no-sandbox" in readme
     assert "signInx" in readme
     assert "本機 Google Chrome" in readme
     assert "屋企 IP 都被當 bot" in readme
