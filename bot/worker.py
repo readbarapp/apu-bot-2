@@ -26,7 +26,11 @@ from bot.inventory import (
 )
 from bot.logs import hub
 from bot.models import WorkerProfile
-from bot.window import bring_context_to_front
+from bot.window import (
+    bring_context_to_front,
+    browser_launch_message,
+    launch_stealth_context,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 SESSIONS_ROOT = ROOT / "sessions"
@@ -218,14 +222,10 @@ class Worker:
             return
         self._set("launching", "正在啟動持久化瀏覽器會話")
         user_data_dir = str(resolve_session_dir(self.profile.session_dir))
-        self.context = await self._playwright.chromium.launch_persistent_context(
-            user_data_dir,
-            headless=False,
-            viewport={"width": 1440, "height": 900},
-            locale="zh-HK",
-            timezone_id="Asia/Hong_Kong",
-            args=["--disable-blink-features=AutomationControlled"],
+        self.context, browser_label = await launch_stealth_context(
+            self._playwright, user_data_dir
         )
+        hub.info(self.profile.name, browser_launch_message(browser_label))
         self._bind_close_watchers()
         page = self.context.pages[0] if self.context.pages else await self.context.new_page()
         await page.goto(shop_home_url(), wait_until="domcontentloaded", timeout=45_000)
