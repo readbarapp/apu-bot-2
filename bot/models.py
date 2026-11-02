@@ -65,6 +65,16 @@ class GuestProfile(BaseModel):
             raise ValueError("信用卡號碼必須係 16 個數字")
         return digits
 
+    @field_validator("cvv")
+    @classmethod
+    def cvv_digits(cls, value: str) -> str:
+        if not value:
+            return value
+        digits = re.sub(r"\D", "", value)
+        if len(digits) not in {3, 4}:
+            raise ValueError("CVV 必須係 3 或 4 個數字")
+        return digits
+
     def missing_labels(self) -> list[str]:
         missing: list[str] = []
         for key, label in GUEST_FIELD_LABELS.items():
@@ -115,11 +125,7 @@ class WorkerProfile(BaseModel):
         else:
             if not self.session_dir:
                 self.session_dir = f"session_guest_{self.id}"
-            missing = [
-                label
-                for key, label in GUEST_FIELD_LABELS.items()
-                if key not in {"card_number", "cvv"} and not getattr(self.guest, key)
-            ]
+            missing = self.guest.missing_labels()
             if missing:
                 raise ValueError(f"訪客模式請填妥：{'、'.join(missing)}")
         if self.fulfillment == "pickup" and not self.stores:

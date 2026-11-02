@@ -19,6 +19,7 @@ from bot.checkout import (
     checkout_is_blocked,
     wait_if_checkout_blocked,
 )
+from bot.models import GuestProfile
 from bot.inventory import days_from_quote
 from bot.logs import hub, redact_message
 from bot.secrets import encrypt_text, decrypt_text, public_guest, save_guest_secrets, load_guest_secrets
@@ -63,6 +64,16 @@ def test_apple_id_mode_requires_session_dir(client) -> None:
     assert response.status_code == 422
 
 
+def test_guest_profile_lists_every_empty_field() -> None:
+    guest = GuestProfile(last_name="Chan", first_name="Tai Man")
+    missing = guest.missing_labels()
+    assert "電郵地址" in missing
+    assert "信用卡號碼" in missing
+    assert "有效月份" in missing
+    assert "CVV 安全碼" in missing
+    assert "英文姓氏" not in missing
+
+
 def test_guest_card_must_be_sixteen_digits(client) -> None:
     payload = {
         **SAMPLE_GUEST,
@@ -79,6 +90,21 @@ def test_guest_incomplete_is_rejected(client) -> None:
     }
     response = client.post("/api/start", json={"test_mode": True, "workers": [payload]})
     assert response.status_code == 422
+
+
+def test_guest_missing_card_or_cvv_is_rejected(client) -> None:
+    no_cvv = {
+        **SAMPLE_GUEST,
+        "guest": {**SAMPLE_GUEST["guest"], "cvv": ""},
+    }
+    no_card = {
+        **SAMPLE_GUEST,
+        "id": "g2",
+        "session_dir": "session_guest_2",
+        "guest": {**SAMPLE_GUEST["guest"], "card_number": ""},
+    }
+    assert client.post("/api/start", json={"test_mode": True, "workers": [no_cvv]}).status_code == 422
+    assert client.post("/api/start", json={"test_mode": True, "workers": [no_card]}).status_code == 422
 
 
 def test_guest_can_start_without_apple_id_login(client) -> None:
@@ -367,6 +393,10 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "guest-cvv" in js
     assert "delivery-days" in js
     assert "訪客模式請填妥" in js
+    assert "填晒先可以儲存同開始運作" in js
+    assert "請選擇" in js
+    assert 'card_month: ""' in js
+    assert "digits.length < 3" in js
     assert "待命（已填妥資料）" in js
     assert "maxlength=\"16\"" in js
     assert "slice(0, 16)" in js

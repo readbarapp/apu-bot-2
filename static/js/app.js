@@ -189,8 +189,8 @@
       phone: "",
       address: "",
       card_number: "",
-      card_month: "12",
-      card_year: "2028",
+      card_month: "",
+      card_year: "",
       cvv: "",
     };
   }
@@ -242,7 +242,10 @@
         if (isMaskedCard(value) && cardDigits(value).length >= 4) return false;
         return cardDigits(value).length !== 16;
       }
-      if (key === "cvv") return !value && !isMaskedCard(guest.card_number);
+      if (key === "cvv") {
+        const digits = cardDigits(value);
+        return digits.length < 3 || digits.length > 4;
+      }
       return !value;
     }).map(([, label]) => label);
   }
@@ -345,6 +348,15 @@
       hint.className = "save-hint-one locked";
       hint.textContent = "運作中已鎖定。請先「暫停運作」先至可以改同儲存。";
       return;
+    }
+    if (isGuestMode(worker)) {
+      const missing = guestMissing(worker);
+      if (missing.length) {
+        if (button) button.disabled = true;
+        hint.className = "save-hint-one dirty";
+        hint.textContent = `訪客模式請填妥：${missing.join("、")}。填晒先可以儲存同開始運作。`;
+        return;
+      }
     }
     if (dirty) {
       hint.className = "save-hint-one dirty";
@@ -579,15 +591,17 @@
 
   function yearOptions(selected) {
     const year = new Date().getFullYear();
-    return Array.from({ length: 12 }, (_, index) => String(year + index)).map((value) => (
+    const years = Array.from({ length: 12 }, (_, index) => String(year + index));
+    return [`<option value="">請選擇</option>`].concat(years.map((value) => (
       `<option value="${esc(value)}" ${String(selected) === value ? "selected" : ""}>${esc(value)}</option>`
-    )).join("");
+    ))).join("");
   }
 
   function monthOptions(selected) {
-    return Array.from({ length: 12 }, (_, index) => String(index + 1).padStart(2, "0")).map((value) => (
+    const months = Array.from({ length: 12 }, (_, index) => String(index + 1).padStart(2, "0"));
+    return [`<option value="">請選擇</option>`].concat(months.map((value) => (
       `<option value="${esc(value)}" ${String(selected).padStart(2, "0") === value ? "selected" : ""}>${esc(value)}</option>`
-    )).join("");
+    ))).join("");
   }
 
   function workerCardHtml(worker, entering) {
@@ -600,6 +614,7 @@
     const saved = !isDirty(worker);
     const guest = { ...emptyGuest(), ...(worker.guest || {}) };
     const checkoutMode = worker.checkout_mode || "apple_id";
+    const guestIncomplete = checkoutMode === "guest" ? guestMissing(worker) : [];
     const fulfillment = worker.fulfillment || "pickup";
     const note = worker.last_message || (checkoutMode === "guest"
       ? (guestReady(worker)
@@ -668,7 +683,7 @@
               <label class="field"><span>有效年份</span><select class="guest-year">${yearOptions(guest.card_year)}</select></label>
               <label class="field"><span>CVV 安全碼</span><input class="guest-cvv" type="password" maxlength="4" autocomplete="off" value="${esc(guest.cvv)}" /></label>
             </div>
-            <p class="help">信用卡號碼只可以填 16 個數字。卡號同 CVV 只會加密寫入本機 secrets 資料夾。清瀏覽器後 CVV 要再填一次。</p>
+            <p class="help">訪客模式要填晒呢度全部欄位先可以儲存同開始運作。信用卡號碼只可以填 16 個數字。卡號同 CVV 只會加密寫入本機 secrets 資料夾。重新開控制台之後 CVV 要再填一次。</p>
           </div>
           <div class="field full sku-block">
             <span>1. 目標機型（每個 Worker 只搶一個 SKU）</span>
@@ -702,8 +717,8 @@
           </label>
         </div>
         <div class="card-save">
-          <button type="button" class="btn save save-one" ${sniping || saved ? "disabled" : ""}>儲存此 Worker</button>
-          <p class="save-hint-one ${sniping ? "locked" : (saved ? "saved" : "dirty")}">${sniping ? "運作中已鎖定。請先「暫停運作」先至可以改同儲存。" : (saved ? "此 Worker 已儲存。" : "此 Worker 有未儲存變更。")}</p>
+          <button type="button" class="btn save save-one" ${sniping || saved || guestIncomplete.length ? "disabled" : ""}>儲存此 Worker</button>
+          <p class="save-hint-one ${sniping ? "locked" : (guestIncomplete.length || !saved ? "dirty" : "saved")}">${sniping ? "運作中已鎖定。請先「暫停運作」先至可以改同儲存。" : (guestIncomplete.length ? `訪客模式請填妥：${guestIncomplete.join("、")}。填晒先可以儲存同開始運作。` : (saved ? "此 Worker 已儲存。" : "此 Worker 有未儲存變更。"))}</p>
         </div>
         <div class="card-actions">
           <button type="button" class="btn focus">顯示此 Worker 視窗</button>
