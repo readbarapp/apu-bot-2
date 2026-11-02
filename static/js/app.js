@@ -766,7 +766,7 @@
               <label class="field"><span>CVV 安全碼</span><input class="guest-cvv" type="password" maxlength="4" autocomplete="new-password" value="${guestHasMaskedCard(guest) ? maskedCvvValue() : esc(guest.cvv)}" /></label>
             </div>
             <p class="help guest-card-status">${esc(guestCardStatusText(guest))}</p>
-            <p class="help">第一次要填晒全部欄位先可以儲存。儲存後仍然睇到已填資料：卡號顯示 •••• 後四位，CVV 顯示成圓點，代表已經有資料。打錯姓名／地址可以再改再存。要換卡先至要填新嘅 16 位卡號同 CVV。官網帳單地址有兩欄：第一欄填區域／地區／街道名稱及號碼，第二欄填屋苑或大廈／座數／樓層／單位。控制台年份顯示 2028，填入 Apple 官網時會轉成 MM/YY（例如 12/28），唔會填 12/2028。卡號同 CVV 只會加密寫入本機 secrets 資料夾。</p>
+            <p class="help">第一次要填晒全部欄位先可以儲存。儲存後仍然睇到已填資料：卡號顯示 •••• 後四位，CVV 顯示成圓點，代表已經有資料。改姓名、地址、電話或換卡都可以再撳「儲存此 Worker」。要換卡：撳入卡號格清走 ••••，打新嘅 16 位同新 CVV。官網帳單地址有兩欄：第一欄填區域／地區／街道名稱及號碼，第二欄填屋苑或大廈／座數／樓層／單位。控制台年份顯示 2028，填入 Apple 官網時會轉成 MM/YY（例如 12/28），唔會填 12/2028。卡號同 CVV 只會加密寫入本機 secrets 資料夾。</p>
           </div>
           <div class="field full sku-block">
             <span>1. 目標機型（每個 Worker 只搶一個 SKU）</span>
@@ -883,10 +883,20 @@
     if (cardStatus) cardStatus.textContent = guestCardStatusText(worker.guest || {});
     const cardInput = card.querySelector(".guest-card");
     const cvvInput = card.querySelector(".guest-cvv");
-    if (cardInput && guestHasMaskedCard(worker.guest) && (!cardInput.value || isMaskedCard(cardInput.value))) {
+    if (
+      cardInput
+      && document.activeElement !== cardInput
+      && guestHasMaskedCard(worker.guest)
+      && (!cardInput.value.trim() || isMaskedCard(cardInput.value))
+    ) {
       cardInput.value = String(worker.guest.card_number || "").trim();
     }
-    if (cvvInput && guestHasMaskedCard(worker.guest) && !cardDigits(cvvInput.value)) {
+    if (
+      cvvInput
+      && document.activeElement !== cvvInput
+      && guestHasMaskedCard(worker.guest)
+      && !cardDigits(cvvInput.value)
+    ) {
       cvvInput.value = maskedCvvValue();
     }
     const meta = card.querySelector(".collapsed-meta");
@@ -950,21 +960,20 @@
     if (Array.isArray(data.workers) && data.workers.length) {
       const byId = new Map(data.workers.map((item) => [item.id, item]));
       state.workers = state.workers.map((worker) => {
-        const incoming = byId.get(worker.id) || {};
-        const guest = { ...(worker.guest || {}), ...(incoming.guest || {}) };
-        if (!(incoming.guest && incoming.guest.cvv)) guest.cvv = (worker.guest || {}).cvv || "";
-        const incomingCard = String((incoming.guest || {}).card_number || "");
-        const localCard = String((worker.guest || {}).card_number || "");
-        if (incomingCard.includes("•") && localCard.replace(/\D/g, "").length >= 12) {
-          guest.card_number = localCard;
-        }
-        return { ...worker, ...incoming, guest };
+        const incoming = byId.get(worker.id);
+        if (!incoming) return worker;
+        return {
+          ...worker,
+          status: incoming.status || worker.status,
+          last_message: incoming.last_message || worker.last_message,
+          purchased: Number(incoming.purchased ?? worker.purchased ?? 0),
+          apple_id: incoming.apple_id || worker.apple_id,
+          logged_in: Boolean(incoming.logged_in || incoming.apple_id || worker.logged_in),
+          sniping: Boolean(incoming.sniping),
+          browser_open: Boolean(incoming.browser_open),
+        };
       });
-      data.workers.forEach((item) => {
-        const local = state.workers.find((worker) => worker.id === item.id);
-        if (!local) return;
-        patchWorkerStatus({ ...item, ...local });
-      });
+      state.workers.forEach(patchWorkerStatus);
     }
     setRunning(Boolean(data.running), data.test_mode);
   }

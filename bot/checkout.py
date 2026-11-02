@@ -66,6 +66,11 @@ PICKUP_LOCATION_UI_PATTERN = re.compile(
     re.I,
 )
 PICKUP_LOCATION_ERROR_PATTERN = re.compile(r"請輸入地區")
+PICKUP_APPLIED_PATTERN = re.compile(r"正在顯示以下地點附近的零售店")
+PICKUP_DETAILS_CONTINUE_PATTERN = re.compile(
+    r"繼續前往取貨詳情|Continue to Pickup Details",
+    re.I,
+)
 PICKUP_STORE_LIST_PATTERN = re.compile(
     r"Apple Store|ifc mall|Hysan Place|Canton Road|Festival Walk|"
     r"New Town Plaza|apm Hong Kong|取貨地點",
@@ -109,7 +114,14 @@ FIELD_CANDIDATES = {
     "last_name": [r"姓氏", r"姓", r"Last Name", r"lastName", r"familyName"],
     "first_name": [r"名字", r"名(?!稱)", r"First Name", r"firstName", r"givenName"],
     "email": [r"電郵地址", r"電郵", r"電子郵件", r"Email", r"emailAddress"],
-    "phone": [r"手提電話", r"電話號碼", r"電話", r"手機", r"Phone", r"Mobile", r"fullDaytimePhone"],
+    "phone": [
+        r"手提電話號碼",
+        r"^手提電話$",
+        r"聯絡電話",
+        r"Mobile Number",
+        r"Phone Number",
+        r"fullDaytimePhone",
+    ],
     "address_street": [
         r"街道名稱及號碼",
         r"街道地址",
@@ -140,6 +152,15 @@ COMBINED_EXPIRY_PATTERNS = [
     r"Expiration Date",
     r"expirationDate",
 ]
+
+
+def hk_phone_number(phone: str) -> str:
+    digits = re.sub(r"\D", "", phone or "")
+    if digits.startswith("852") and len(digits) >= 11:
+        digits = digits[3:]
+    if len(digits) > 8:
+        digits = digits[-8:]
+    return digits
 
 
 def card_year_yy(year: str) -> str:
@@ -742,6 +763,12 @@ async def _choose_input_value(handle, values: list[str]) -> str:
 
 
 async def _apply_fill(handle, values: list[str]) -> bool:
+    try:
+        input_type = str(await handle.get_attribute("type") or "").lower()
+        if input_type in {"checkbox", "radio"}:
+            return False
+    except Exception:
+        pass
     tag = await handle.evaluate("el => (el.tagName || '').toLowerCase()")
     if tag == "select":
         for candidate in values:
@@ -755,8 +782,39 @@ async def _apply_fill(handle, values: list[str]) -> bool:
                 except Exception:
                     continue
         return False
+    try:
+        await handle.click(timeout=800)
+    except Exception:
+        pass
     await handle.fill(await _choose_input_value(handle, values), timeout=2000)
     return True
+
+
+async def _fill_phone(page, phone: str) -> bool:
+    value = hk_phone_number(phone)
+    if not value:
+        return False
+    locators = [
+        page.locator('input[type="tel"]'),
+        page.locator(
+            'input[autocomplete="tel" i], input[data-autom*="phone" i], '
+            'input[id*="phone" i], input[name*="phone" i], '
+            'input[name*="fullDaytimePhone" i]'
+        ),
+        page.get_by_role("textbox", name=re.compile(r"手提電話號碼|^手提電話$")),
+        page.get_by_label(re.compile(r"手提電話號碼|^手提電話$")),
+        page.get_by_placeholder(re.compile(r"手提電話號碼|^手提電話$")),
+    ]
+    for locator in locators:
+        try:
+            handle = locator.first
+            await handle.wait_for(state="visible", timeout=1800)
+            if await _apply_fill(handle, [value]):
+                return True
+        except Exception:
+            continue
+    hub.warn("checkout", "未能填入手提電話")
+    return False
 
 
 async def _fill_labeled(page, patterns: list[str], value: str | list[str]) -> bool:
@@ -817,7 +875,10 @@ async def _fill_contact(page, guest: GuestProfile | None) -> None:
         "phone": guest.phone,
     }
     for key, value in mapping.items():
-        await _fill_labeled(page, FIELD_CANDIDATES[key], value)
+        if key == "phone":
+            await _fill_phone(page, value)
+        else:
+            await _fill_labeled(page, FIELD_CANDIDATES[key], value)
 
 
 async def _fill_shipping(page, guest: GuestProfile | None) -> None:
@@ -829,7 +890,7 @@ async def _fill_shipping(page, guest: GuestProfile | None) -> None:
     await _select_hong_kong(page)
     await _fill_address(page, guest)
     await _fill_labeled(page, FIELD_CANDIDATES["email"], guest.email)
-    await _fill_labeled(page, FIELD_CANDIDATES["phone"], guest.phone)
+    await _fill_phone(page, guest.phone)
 
 
 async def _select_hong_kong(page) -> None:
@@ -1027,11 +1088,23 @@ async def _pickup_stores_visible(page, timeout: int = 3500) -> bool:
         return False
 
 
+async def _pickup_stores_ready(page) -> bool:
+    try:
+        handle = page.get_by_text(PICKUP_APPLIED_PATTERN).first
+        if await _locator_is_visible(handle):
+            return True
+    except Exception:
+        pass
+    return await _pickup_stores_visible(page, timeout=800)
+
+
 async def _apply_pickup_location(
     page, query: str = PICKUP_LOCATION, timeout: int = 12_000
 ) -> bool:
     """Apple HK hides pickup stores until a district is applied. Hong Kong lists all six."""
     await _wait_for_pickup_location_ui(page, timeout=min(timeout, 8000))
+    if await _pickup_stores_ready(page):
+        return True
     deadline = asyncio.get_running_loop().time() + max(timeout / 1000, 0.05)
     filled = False
     while asyncio.get_running_loop().time() < deadline:
@@ -1083,13 +1156,16 @@ async def _click_pickup_store(page, match: StockMatch, timeout: int = 4000) -> b
 
 async def _select_pickup_store(page, match: StockMatch, timeout: int) -> bool:
     await _click_choice(page, PICKUP_PATTERN, timeout=timeout)
-    if await _apply_pickup_location(page, PICKUP_LOCATION) and await _click_pickup_store(page, match):
+    if not await _pickup_stores_ready(page):
+        await _apply_pickup_location(page, PICKUP_LOCATION)
+    if await _click_pickup_store(page, match, timeout=2500):
         return True
     area = (STORE_BY_ID.get(match.store_id) or {}).get("area") or ""
     for query in (area, match.store_name):
         if not query:
             continue
-        if await _apply_pickup_location(page, query) and await _click_pickup_store(page, match):
+        await _apply_pickup_location(page, query)
+        if await _click_pickup_store(page, match):
             return True
     hub.warn("checkout", f"未能自動點選門市 {match.store_name}，將繼續嘗試結帳步驟")
     return False
@@ -1173,9 +1249,15 @@ async def _handle_fulfillment(
         await _click_choice(page, DELIVERY_PATTERN, timeout=4000)
         return await _abort_if_delivery_too_slow(page, match, delivery_max_days)
 
+    if checkout_stage(page.url) == "contact":
+        return None
     if not await _select_pickup_store(page, match, timeout=4000):
         return RETRY_FULFILLMENT
-    if not await _maybe_click(page, CONTINUE_PATTERN, timeout=5000):
+    if checkout_stage(page.url) == "contact":
+        return None
+    if not await _maybe_click(page, PICKUP_DETAILS_CONTINUE_PATTERN, timeout=5000):
+        if checkout_stage(page.url) == "contact":
+            return None
         hub.warn("checkout", "已揀門市，但未撳到「繼續前往取貨詳情」")
         return RETRY_FULFILLMENT
     hub.info("checkout", "已撳「繼續前往取貨詳情」")
