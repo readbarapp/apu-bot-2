@@ -265,9 +265,11 @@ async def wait_if_checkout_blocked(page, timeout: int = 8000) -> bool:
 def _response_looks_blocked(response) -> bool:
     url = getattr(response, "url", "") or ""
     status = int(getattr(response, "status", 0) or 0)
-    if status == 541 or checkout_is_blocked(url):
+    if re.search(r"fulfillment-messages|pickup-message", url, re.I):
+        return False
+    if checkout_is_blocked(url):
         return True
-    if status >= 400 and re.search(r"add-to-cart|signInx|/shop/541", url, re.I):
+    if status == 541 or (status >= 400 and re.search(r"add-to-cart|signInx|/shop/541", url, re.I)):
         return True
     return False
 
@@ -531,15 +533,16 @@ async def _complete_add_to_bag(page, timeout: int = 4000) -> str:
             page.remove_listener("response", on_response)
         except Exception:
             pass
+    url = getattr(page, "url", "") or ""
+    if checkout_stage(url) in {"attach", "bag"}:
+        return "ok"
     title = await page_title(page)
     if (
         saw_block
-        or checkout_is_blocked(getattr(page, "url", "") or "")
+        or checkout_is_blocked(url)
         or re.search(r"page not found|找不到|很抱歉", title, re.I)
     ):
         return "blocked"
-    if checkout_stage(getattr(page, "url", "") or "") in {"attach", "bag"}:
-        return "ok"
     return "missed"
 
 
@@ -895,6 +898,13 @@ async def run_checkout(
             bag_qty = await _set_bag_quantity(page, quantity)
             if not await _click_visible_checkout(page, timeout=CHECKOUT_STEP_TIMEOUT_MS):
                 await page.goto(checkout_url(), wait_until="domcontentloaded", timeout=30_000)
+        try:
+            await page.wait_for_url(
+                re.compile(r"signIn|checkout|/shop/sorry|/shop/541|/shop/404", re.I),
+                timeout=CHECKOUT_STEP_TIMEOUT_MS,
+            )
+        except Exception:
+            pass
         if checkout_is_blocked(page.url):
             hub.error(
                 worker_name,
@@ -939,6 +949,20 @@ async def run_checkout(
             if await _on_place_order_step(page):
                 break
             stage = checkout_stage(page.url)
+            if checkout_mode == "guest" and stage == "signin":
+                blocked = await _continue_as_guest(page)
+                if blocked:
+                    hub.error(
+                        worker_name,
+                        block_report(
+                            "訪客結帳",
+                            page.url,
+                            await page_title(page),
+                            "撳咗以訪客身份繼續之後被擋。可改用 Apple ID 模式；唔好連撳訪客。",
+                        ),
+                    )
+                    return timer.result(False, blocked, pause=True)
+                continue
             if not fulfillment_done and stage in ("fulfillment", "other"):
                 skipped = await _handle_fulfillment(
                     page,
