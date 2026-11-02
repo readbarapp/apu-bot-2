@@ -78,6 +78,7 @@
     save: document.getElementById("btn-save"),
     saveHint: document.getElementById("save-hint"),
     list: document.getElementById("worker-list"),
+    empty: document.getElementById("worker-empty"),
     logs: document.getElementById("log-stream"),
     pill: document.getElementById("run-pill"),
     clearLogs: document.getElementById("btn-clear-logs"),
@@ -164,6 +165,14 @@
     return /[•*]/.test(String(value || ""));
   }
 
+  function isMaskedCvv(value) {
+    return /^[•*]{3,4}$/.test(String(value || "").trim());
+  }
+
+  function maskedCvvValue() {
+    return "•••";
+  }
+
   function statusLabel(status, worker) {
     if (worker && isGuestMode(worker) && !ACTIVE_STATUSES.has(status)) {
       return guestReady(worker) ? "待命（已填妥資料）" : "尚未填妥訪客資料";
@@ -198,12 +207,26 @@
     };
   }
 
-  function defaultWorker(index) {
-    const n = index + 1;
+  function nextWorkerNumber() {
+    const used = new Set(
+      state.workers
+        .map((worker) => String(worker.name || "").match(/^Worker_(\d+)$/i))
+        .filter(Boolean)
+        .map((match) => Number(match[1]))
+    );
+    let n = 1;
+    while (used.has(n)) n += 1;
+    return n;
+  }
+
+  function defaultWorker() {
+    const id = uid();
+    const n = nextWorkerNumber();
+    const short = String(id).replace(/[^a-zA-Z0-9]/g, "").slice(0, 12) || String(Date.now());
     return {
-      id: uid(),
+      id,
       name: `Worker_${n}`,
-      session_dir: `session_worker_${n}`,
+      session_dir: `session_${short}`,
       sku: "MK2E4ZA/A",
       stores: ["R428"],
       pickup_window: "1d",
@@ -248,7 +271,7 @@
 
   function guestCardStatusText(guest) {
     if (guestHasMaskedCard(guest)) {
-      return `已儲存信用卡 ${String(guest.card_number).trim()}。欄位空白＝繼續用呢張卡，唔使再填 CVV。要換卡先至重新輸入 16 位同新 CVV。`;
+      return `已儲存信用卡 ${String(guest.card_number).trim()}，CVV 已加密存放（畫面顯示圓點）。要換卡先至改 16 位同新 CVV。`;
     }
     return "未儲存信用卡。請填 16 位卡號同 CVV。";
   }
@@ -265,8 +288,10 @@
         return cardDigits(value).length !== 16;
       }
       if (key === "cvv") {
+        if (isMaskedCvv(value) || !value) {
+          return replacingCard || (!storedCard && !guestHasMaskedCard(guest));
+        }
         const digits = cardDigits(value);
-        if (!value) return replacingCard || (!storedCard && !guestHasMaskedCard(guest));
         return digits.length < 3 || digits.length > 4;
       }
       return !value;
@@ -401,7 +426,7 @@
     if (els.saveHint) {
       if (!state.workers.length) {
         els.saveHint.className = "save-hint dirty";
-        els.saveHint.textContent = "請新增 Worker，並喺該卡撳「儲存此 Worker」。";
+        els.saveHint.textContent = "而家未有 Worker。請撳「新增 Worker」加入搶購程序。";
       } else if (unsaved.length) {
         els.saveHint.className = "save-hint dirty";
         els.saveHint.textContent = `仲有 ${unsaved.length} 個未儲存：${unsaved.map((item) => item.name || "未命名").join("、")}。請喺該卡撳「儲存此 Worker」。`;
@@ -415,8 +440,11 @@
   }
 
   function readCardsIntoState() {
-    const cards = [...els.list.querySelectorAll(".worker-card")];
-    if (!cards.length) return;
+    const cards = [...els.list.querySelectorAll(".worker-card")].filter((card) => card.dataset.removing !== "true");
+    if (!cards.length) {
+      if (![...els.list.querySelectorAll(".worker-card")].length) state.workers = [];
+      return;
+    }
     state.workers = cards.map((card) => {
       const prev = state.workers.find((item) => item.id === card.dataset.id) || {};
       const sniping = card.dataset.sniping === "true" || Boolean(prev.sniping);
@@ -466,7 +494,11 @@
           })(),
           card_month: card.querySelector(".guest-month")?.value.trim() || "",
           card_year: card.querySelector(".guest-year")?.value.trim() || "",
-          cvv: card.querySelector(".guest-cvv")?.value.trim() || "",
+          cvv: (() => {
+            const typed = card.querySelector(".guest-cvv")?.value.trim() || "";
+            if (!typed || isMaskedCvv(typed)) return "";
+            return typed;
+          })(),
         },
         status: card.dataset.status || prev.status || "needs_login",
         last_message: card.dataset.message || prev.last_message || "",
@@ -525,7 +557,7 @@
     if (!els.startHint) return;
     if (!state.workers.length) {
       els.startHint.className = "start-hint blocked";
-      els.startHint.textContent = "請先新增並儲存 Worker。";
+      els.startHint.textContent = "而家未有 Worker。請撳「新增 Worker」加入搶購程序。";
       return;
     }
     if (unsaved.length) {
@@ -719,13 +751,13 @@
               <label class="field"><span>香港聯絡電話</span><input class="guest-phone" type="tel" autocomplete="off" value="${esc(guest.phone)}" /></label>
               <label class="field full"><span>街道地址（區域、地區、街道名稱及號碼）</span><input class="guest-address-street" type="text" autocomplete="off" value="${esc(guest.address_street || guest.address)}" placeholder="例如 中環金融街 8 號" /></label>
               <label class="field full"><span>屋苑或大廈／座數／樓層／單位</span><input class="guest-address-building" type="text" autocomplete="off" value="${esc(guest.address_building)}" placeholder="例如 國際金融中心一期 15 樓 1501 室" /></label>
-              <label class="field full"><span>信用卡號碼（16 個數字）</span><input class="guest-card" type="text" inputmode="numeric" maxlength="16" autocomplete="off" value="${esc(guestHasMaskedCard(guest) ? "" : guest.card_number)}" placeholder="${guestHasMaskedCard(guest) ? "已儲存，留空即可" : ""}" /></label>
+              <label class="field full"><span>信用卡號碼（16 個數字）</span><input class="guest-card" type="text" maxlength="19" autocomplete="off" value="${esc(guest.card_number)}" /></label>
               <label class="field"><span>有效月份</span><select class="guest-month">${monthOptions(guest.card_month)}</select></label>
               <label class="field"><span>有效年份</span><select class="guest-year">${yearOptions(guest.card_year)}</select></label>
-              <label class="field"><span>CVV 安全碼</span><input class="guest-cvv" type="password" maxlength="4" autocomplete="off" value="" placeholder="${guestHasMaskedCard(guest) ? "已儲存，留空即可" : ""}" /></label>
+              <label class="field"><span>CVV 安全碼</span><input class="guest-cvv" type="password" maxlength="4" autocomplete="new-password" value="${guestHasMaskedCard(guest) ? maskedCvvValue() : esc(guest.cvv)}" /></label>
             </div>
             <p class="help guest-card-status">${esc(guestCardStatusText(guest))}</p>
-            <p class="help">第一次要填晒全部欄位先可以儲存。儲存後卡號同 CVV 欄會空白係正常（安全，唔會留喺畫面），上面會顯示已儲存 •••• 後四位，唔使再填就可以開始運作。打錯姓名／地址可以再改再存。要換卡先至要填新嘅 16 位卡號同 CVV。官網帳單地址有兩欄：第一欄填區域／地區／街道名稱及號碼，第二欄填屋苑或大廈／座數／樓層／單位。控制台年份顯示 2028，填入 Apple 官網時會轉成 MM/YY（例如 12/28），唔會填 12/2028。卡號同 CVV 只會加密寫入本機 secrets 資料夾。</p>
+            <p class="help">第一次要填晒全部欄位先可以儲存。儲存後仍然睇到已填資料：卡號顯示 •••• 後四位，CVV 顯示成圓點，代表已經有資料。打錯姓名／地址可以再改再存。要換卡先至要填新嘅 16 位卡號同 CVV。官網帳單地址有兩欄：第一欄填區域／地區／街道名稱及號碼，第二欄填屋苑或大廈／座數／樓層／單位。控制台年份顯示 2028，填入 Apple 官網時會轉成 MM/YY（例如 12/28），唔會填 12/2028。卡號同 CVV 只會加密寫入本機 secrets 資料夾。</p>
           </div>
           <div class="field full sku-block">
             <span>1. 目標機型（每個 Worker 只搶一個 SKU）</span>
@@ -771,8 +803,13 @@
     `;
   }
 
+  function syncEmptyState() {
+    if (els.empty) els.empty.hidden = state.workers.length > 0;
+  }
+
   function renderWorkers() {
     els.list.innerHTML = state.workers.map((worker) => workerCardHtml(worker, false)).join("");
+    syncEmptyState();
     setRunning(state.running, els.testMode.checked);
     updateSaveHint();
   }
@@ -784,6 +821,7 @@
       card.addEventListener("animationend", () => card.classList.remove("enter"), { once: true });
       card.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
+    syncEmptyState();
     setRunning(state.running, els.testMode.checked);
     updateSaveHint();
   }
@@ -836,12 +874,11 @@
     if (cardStatus) cardStatus.textContent = guestCardStatusText(worker.guest || {});
     const cardInput = card.querySelector(".guest-card");
     const cvvInput = card.querySelector(".guest-cvv");
-    if (cardInput && guestHasMaskedCard(worker.guest) && isMaskedCard(cardInput.value)) {
-      cardInput.value = "";
-      cardInput.placeholder = "已儲存，留空即可";
+    if (cardInput && guestHasMaskedCard(worker.guest) && (!cardInput.value || isMaskedCard(cardInput.value))) {
+      cardInput.value = String(worker.guest.card_number || "").trim();
     }
     if (cvvInput && guestHasMaskedCard(worker.guest) && !cardDigits(cvvInput.value)) {
-      cvvInput.placeholder = "已儲存，留空即可";
+      cvvInput.value = maskedCvvValue();
     }
     const meta = card.querySelector(".collapsed-meta");
     if (meta) {
@@ -915,13 +952,9 @@
         return { ...worker, ...incoming, guest };
       });
       data.workers.forEach((item) => {
-        if (!state.workers.some((worker) => worker.id === item.id)) {
-          state.workers.push(item);
-          if (!els.list.querySelector(`[data-id="${CSS.escape(item.id)}"]`)) {
-            mountWorker(item);
-          }
-        }
-        patchWorkerStatus({ ...item, ...(state.workers.find((worker) => worker.id === item.id) || {}) });
+        const local = state.workers.find((worker) => worker.id === item.id);
+        if (!local) return;
+        patchWorkerStatus({ ...item, ...local });
       });
     }
     setRunning(Boolean(data.running), data.test_mode);
@@ -939,6 +972,45 @@
       worker: "frontend",
       level: "warn",
       message: reason || "未連到後台，已切換為預覽模式。設定同儲存都可以試，但唔會開瀏覽器、唔會下單。",
+    });
+  }
+
+  async function removeWorker(id) {
+    readCardsIntoState();
+    const worker = state.workers.find((item) => item.id === id);
+    if (!worker) return;
+    if (worker.sniping) {
+      window.alert("呢個 Worker 運作中，請先「暫停運作」再刪除。");
+      return;
+    }
+    const card = els.list.querySelector(`[data-id="${CSS.escape(id)}"]`);
+    if (card) card.dataset.removing = "true";
+    const sessionDir = worker.session_dir || "";
+    const name = worker.name || id;
+    state.workers = state.workers.filter((item) => item.id !== id);
+    state.savedWorkers = state.savedWorkers.filter((item) => item.id !== id);
+    saveJson(STORAGE_SAVED, state.savedWorkers);
+    const collapsed = collapsedSet();
+    collapsed.delete(id);
+    saveJson(STORAGE_COLLAPSED, [...collapsed]);
+    persistDraft();
+    if (card && card.parentNode) card.remove();
+    syncEmptyState();
+    updateSaveHint();
+    setRunning(state.running, els.testMode.checked);
+    if (!state.previewMode) {
+      try {
+        const query = sessionDir ? `?session_dir=${encodeURIComponent(sessionDir)}` : "";
+        await api(`/api/workers/${encodeURIComponent(id)}${query}`, { method: "DELETE" });
+      } catch (err) {
+        appendLog({ ts: new Date().toISOString(), worker: name, level: "error", message: err.message });
+      }
+    }
+    appendLog({
+      ts: new Date().toISOString(),
+      worker: name,
+      level: "success",
+      message: `已刪除 ${name}，連本機 session／訪客加密資料都清咗。`,
     });
   }
 
@@ -1008,17 +1080,11 @@
       if (card) {
         const cardInput = card.querySelector(".guest-card");
         const cvvInput = card.querySelector(".guest-cvv");
-        if (cardInput) {
-          cardInput.value = "";
-          cardInput.placeholder = "已儲存，留空即可";
-        }
-        if (cvvInput) {
-          cvvInput.value = "";
-          cvvInput.placeholder = "已儲存，留空即可";
-        }
+        if (cardInput) cardInput.value = worker.guest.card_number;
+        if (cvvInput) cvvInput.value = maskedCvvValue();
       }
       worker.status = "ready";
-      worker.last_message = "訪客資料已填妥並已儲存。卡號同 CVV 已加密存放，欄位空白都可以開始運作。";
+      worker.last_message = "訪客資料已填妥並已儲存。卡號同 CVV 已加密存放，畫面會顯示後四位同圓點。";
     }
     updateSaveHint();
     patchWorkerStatus(worker);
@@ -1290,24 +1356,8 @@
       return;
     }
     if (event.target.closest(".remove")) {
-      if (card.dataset.sniping === "true") return;
-      const remaining = state.workers.filter((worker) => worker.id !== card.dataset.id);
-      let closed = false;
-      const finish = () => {
-        if (closed) return;
-        closed = true;
-        if (card.parentNode) card.remove();
-        state.workers = remaining.length ? remaining : [defaultWorker(0)];
-        state.savedWorkers = state.savedWorkers.filter((item) => state.workers.some((worker) => worker.id === item.id));
-        saveJson(STORAGE_SAVED, state.savedWorkers);
-        persistDraft();
-        if (!remaining.length) mountWorker(state.workers[0]);
-        updateSaveHint();
-        setRunning(state.running, els.testMode.checked);
-      };
-      card.classList.add("leave");
-      card.addEventListener("animationend", finish, { once: true });
-      window.setTimeout(finish, 280);
+      removeWorker(card.dataset.id);
+      return;
     }
     if (event.target.closest(".focus")) {
       focusWorker(card.dataset.id);
@@ -1390,7 +1440,7 @@
   els.stop.addEventListener("click", stop);
   els.add.addEventListener("click", () => {
     readCardsIntoState();
-    const worker = defaultWorker(state.workers.length);
+    const worker = defaultWorker();
     state.workers.push(worker);
     persistDraft();
     mountWorker(worker);
@@ -1415,7 +1465,8 @@
     const draft = loadJson(STORAGE_PROFILES, []);
     state.extraSkus = normalizeExtraSkus(loadJson(STORAGE_SKUS, []));
     state.savedWorkers = saved;
-    state.workers = (draft.length ? draft : saved).length ? (draft.length ? draft : saved) : [defaultWorker(0)];
+    const loaded = draft.length ? draft : saved;
+    state.workers = Array.isArray(loaded) ? loaded : [];
     els.testMode.checked = localStorage.getItem(STORAGE_MODE) !== "0";
     modeHint();
 

@@ -5,8 +5,8 @@ from typing import Any
 
 from bot.logs import hub
 from bot.models import GuestProfile, StartRequest, WorkerProfile
-from bot.secrets import merge_guest_payload, public_guest
-from bot.worker import Worker
+from bot.secrets import delete_guest_secrets, merge_guest_payload, public_guest
+from bot.worker import Worker, delete_session_dir
 
 
 class EngineError(Exception):
@@ -124,6 +124,21 @@ class BotManager:
         worker = self._get(worker_id)
         await worker.stop_sniping()
         self._refresh_running()
+        return self.status()
+
+    async def delete_worker(self, worker_id: str, session_dir: str = "") -> dict:
+        existing = self.workers.pop(worker_id, None)
+        folder = session_dir or (existing.profile.session_dir if existing else "")
+        if existing:
+            try:
+                await existing.shutdown()
+            except Exception:
+                pass
+            self._refresh_running()
+        delete_guest_secrets(worker_id)
+        delete_session_dir(folder)
+        label = existing.profile.name if existing else worker_id
+        hub.info(label, "已刪除此 Worker 嘅本機資料（session 同訪客加密檔）。")
         return self.status()
 
     async def start(self, request: StartRequest) -> dict:

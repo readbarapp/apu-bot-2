@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,19 @@ def resolve_session_dir(raw: str) -> Path:
     path = session_dir_path(raw)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def delete_session_dir(raw: str) -> None:
+    if not str(raw or "").strip():
+        return
+    path = session_dir_path(raw)
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(SESSIONS_ROOT.resolve())
+    except (ValueError, OSError):
+        return
+    if resolved.exists():
+        shutil.rmtree(resolved, ignore_errors=True)
 
 
 def is_browser_closed_error(exc: Exception) -> bool:

@@ -39,7 +39,14 @@ from bot.checkout import (
 from bot.models import GuestProfile
 from bot.inventory import days_from_quote
 from bot.logs import hub, redact_message
-from bot.secrets import encrypt_text, decrypt_text, public_guest, save_guest_secrets, load_guest_secrets
+from bot.secrets import (
+    encrypt_text,
+    decrypt_text,
+    public_guest,
+    save_guest_secrets,
+    load_guest_secrets,
+    merge_guest_payload,
+)
 
 SAMPLE_WORKER = {
     "id": "w1",
@@ -378,6 +385,42 @@ def test_secret_roundtrip_and_gitignore() -> None:
     assert ".env" in gitignore
     assert "secrets/" in gitignore
     assert "sessions/*" in gitignore
+
+
+def test_delete_worker_removes_secrets(client) -> None:
+    saved = client.post("/api/workers/secrets", json={"test_mode": True, "worker": SAMPLE_GUEST})
+    assert saved.status_code == 200
+    assert load_guest_secrets("g1") is not None
+    gone = client.delete("/api/workers/g1?session_dir=session_guest_1")
+    assert gone.status_code == 200, gone.text
+    assert load_guest_secrets("g1") is None
+
+
+def test_merge_skips_masked_cvv(client) -> None:
+    saved = client.post("/api/workers/secrets", json={"test_mode": True, "worker": SAMPLE_GUEST})
+    assert saved.status_code == 200
+    merged = merge_guest_payload(
+        "g1",
+        {**SAMPLE_GUEST["guest"], "card_number": "•••• 1111", "cvv": "•••"},
+    )
+    assert merged["card_number"] == "4111111111111111"
+    assert merged["cvv"] == "123"
+
+
+def test_delete_session_dir_only_inside_sessions(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "sessions"
+    monkeypatch.setattr("bot.worker.SESSIONS_ROOT", root)
+    from bot.worker import delete_session_dir
+
+    folder = root / "session_abc"
+    folder.mkdir(parents=True)
+    (folder / "x.txt").write_text("keep-me-not", encoding="utf-8")
+    delete_session_dir("session_abc")
+    assert not folder.exists()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    delete_session_dir(str(outside))
+    assert outside.exists()
 
 
 def test_redact_message_hides_pan_and_cvv() -> None:
@@ -790,7 +833,10 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "guestHasMaskedCard" in js
     assert "guestHasStoredCard" in js
     assert "已儲存信用卡" in js
-    assert "欄位空白＝繼續用呢張卡" in js
+    assert "畫面顯示圓點" in js
+    assert "removeWorker" in js
+    assert "而家未有 Worker。請撳「新增 Worker」加入搶購程序。" in js
+    assert "session_${short}" in js
     assert "訪客資料已修改成功" in js
     assert "guestResave" in js
     assert "slice(-2)" in js
@@ -803,7 +849,7 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert 'card_month: ""' in js
     assert "digits.length < 3" in js
     assert "待命（已填妥資料）" in js
-    assert "maxlength=\"16\"" in js
+    assert "maxlength=\"19\"" in js
     assert "slice(0, 16)" in js
     assert "paused" in js
     assert "揀結帳模式" in page
@@ -838,6 +884,8 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "Shipping-init" in readme
     assert "訪客模式搶購流程" in readme
     assert "我更新咗程式之後你要點做" in readme
+    assert "請新增 Worker 加入搶購程序" in readme
+    assert "新增嘅卡唔會帶返舊卡資料" in readme
     assert "唔使重新裝 Python" in readme
     assert "更新完程式，洗唔洗清 cookie" in readme
     assert "PickupContact-init" in readme
