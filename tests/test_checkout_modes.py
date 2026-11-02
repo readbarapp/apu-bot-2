@@ -1271,6 +1271,7 @@ class _FakeBagPage:
         self.url = "https://www.apple.com/hk-zh/shop/bag"
         self.items = items
         self.removed = 0
+        self.wait_for_calls = 0
 
     def get_by_role(self, _role, name=None, **_kwargs):
         return _FakeBagHandle(self, name)
@@ -1298,8 +1299,12 @@ class _FakeBagHandle:
         return bool(re.search(r"移除|Remove|remove", self._name, re.I))
 
     async def wait_for(self, **_kwargs) -> None:
+        self._page.wait_for_calls += 1
         if self._page.items <= 0 or not self._is_remove():
             raise TimeoutError("no remove")
+
+    async def is_visible(self) -> bool:
+        return self._page.items > 0 and self._is_remove()
 
     async def click(self, **_kwargs) -> None:
         if self._page.items <= 0:
@@ -1317,6 +1322,15 @@ async def test_empty_bag_removes_leftover_items() -> None:
     assert await _empty_bag(page) == 2
     assert page.items == 0
     assert page.removed == 2
+    assert page.wait_for_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_empty_bag_returns_immediately_when_already_empty() -> None:
+    page = _FakeBagPage(0)
+    assert await _empty_bag(page) == 0
+    assert page.removed == 0
+    assert page.wait_for_calls == 0
 
 
 class _FakeHandle:
@@ -1477,7 +1491,10 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "唔好用無痕視窗" in readme
     assert "唔使自己開無痕" in readme
     assert "唔會撳立即下單" in readme
+    assert "清購物袋會唔會拖慢搶貨" in readme
+    assert "唔會再繞去購物袋" in readme
     assert "已清走購物袋" in Path("bot/checkout.py").read_text()
+    assert "empty_bag=not self._bag_cleared" in Path("bot/worker.py").read_text()
     assert "User Journey" in readme or "你點用" in readme
     assert "不換購" in readme
     assert "無 AppleCare+" in readme

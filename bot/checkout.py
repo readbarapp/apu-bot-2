@@ -399,6 +399,34 @@ async def _open_bag(page) -> None:
         await page.goto(bag_url(), wait_until="domcontentloaded", timeout=30_000)
 
 
+def _remove_bag_locators(page):
+    return [
+        page.get_by_role("button", name=REMOVE_BAG_PATTERN),
+        page.get_by_role("link", name=REMOVE_BAG_PATTERN),
+        page.locator('[data-autom*="remove" i][data-autom*="bag" i]'),
+        page.locator('[data-autom*="removeitem" i], [data-autom*="remove-item" i]'),
+        page.locator('button[aria-label*="移除" i], button[aria-label*="Remove" i]'),
+    ]
+
+
+async def _first_remove_control(page):
+    """Find a remove control without waiting; empty bag must return immediately."""
+    for locator in _remove_bag_locators(page):
+        try:
+            if await locator.count() == 0:
+                continue
+            handle = locator.first
+            try:
+                if not await handle.is_visible():
+                    continue
+            except Exception:
+                pass
+            return handle
+        except Exception:
+            continue
+    return None
+
+
 async def _empty_bag(page) -> int:
     """Drop leftover test items so checkout does not buy 17e + Duo together."""
     try:
@@ -407,26 +435,14 @@ async def _empty_bag(page) -> int:
         return 0
     removed = 0
     for _ in range(12):
-        clicked = False
-        locators = [
-            page.get_by_role("button", name=REMOVE_BAG_PATTERN),
-            page.get_by_role("link", name=REMOVE_BAG_PATTERN),
-            page.locator('[data-autom*="remove" i][data-autom*="bag" i]'),
-            page.locator('[data-autom*="removeitem" i], [data-autom*="remove-item" i]'),
-            page.locator('button[aria-label*="移除" i], button[aria-label*="Remove" i]'),
-        ]
-        for locator in locators:
-            try:
-                handle = locator.first
-                await handle.wait_for(state="visible", timeout=1200)
-                await handle.click(timeout=2000)
-                removed += 1
-                clicked = True
-                await asyncio.sleep(0.45)
-                break
-            except Exception:
-                continue
-        if not clicked:
+        handle = await _first_remove_control(page)
+        if handle is None:
+            break
+        try:
+            await handle.click(timeout=2000)
+            removed += 1
+            await asyncio.sleep(0.45)
+        except Exception:
             break
     if removed:
         hub.info("checkout", f"已清走購物袋入面 {removed} 件舊貨，避免連測試型號一齊結帳")
@@ -1468,6 +1484,7 @@ async def run_checkout(
     guest: GuestProfile | None = None,
     delivery_max_days: int = 7,
     quantity: int = 1,
+    empty_bag: bool = True,
 ) -> CheckoutResult:
     timer = StepTimer()
     if await _stopped(stop_event):
@@ -1476,7 +1493,8 @@ async def run_checkout(
     try:
         where = match.store_name if fulfillment == "pickup" else f"送貨 {delivery_max_days} 日內"
         hub.info(worker_name, f"開始搶購 {sku}（{where}）")
-        await _empty_bag(page)
+        if empty_bag:
+            await _empty_bag(page)
         await page.goto(product_url(sku), wait_until="domcontentloaded", timeout=45_000)
         await _wait_for_configured_pdp(page)
         if await _stopped(stop_event):

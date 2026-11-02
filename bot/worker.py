@@ -15,7 +15,7 @@ from bot.catalogs import (
     shop_home_url,
 )
 from bot.catalogs import STORE_BY_ID
-from bot.checkout import INTERRUPT_MESSAGE, checkout_is_blocked, run_checkout
+from bot.checkout import INTERRUPT_MESSAGE, _empty_bag, checkout_is_blocked, run_checkout
 from bot.secrets import public_guest
 from bot.inventory import (
     INVENTORY_BLOCK_PAUSE_AFTER,
@@ -108,6 +108,7 @@ class Worker:
         self._login_task: asyncio.Task | None = None
         self._closed_task: asyncio.Task | None = None
         self._closing = False
+        self._bag_cleared = False
         self._rng = random.Random(profile.id)
 
     def snapshot(self) -> dict:
@@ -265,6 +266,7 @@ class Worker:
         await self.ensure_browser()
         if self.sniping:
             return
+        await self._clear_bag_while_waiting()
         await self._open_product_watch_page()
         self.snipe_stop = asyncio.Event()
         self.sniping = True
@@ -273,6 +275,23 @@ class Worker:
             "watching",
             "開始搶購（訪客）。而家喺產品頁用 fetch 查庫存，唔會整頁 refresh；有貨先加車。",
         )
+
+    async def _clear_bag_while_waiting(self) -> None:
+        """Empty leftover SKUs while still waiting for stock, not on the sniping critical path."""
+        try:
+            removed = await _empty_bag(await self._page())
+            self._bag_cleared = True
+            if not removed:
+                hub.info(
+                    self.profile.name,
+                    "購物袋已空。等貨期間唔會再清；有貨加車會直接喺產品頁開始，唔會再繞去購物袋。",
+                )
+        except Exception as exc:
+            self._bag_cleared = False
+            if is_browser_closed_error(exc):
+                self._schedule_browser_closed()
+                raise
+            hub.warn(self.profile.name, f"等貨前清購物袋未完成（{exc}）。有貨時會再試一次。")
 
     async def stop_sniping(self) -> None:
         self.snipe_stop.set()
@@ -416,7 +435,9 @@ class Worker:
                         guest=self.profile.guest if self.profile.checkout_mode == "guest" else None,
                         delivery_max_days=self.profile.delivery_max_days,
                         quantity=remaining,
+                        empty_bag=not self._bag_cleared,
                     )
+                    self._bag_cleared = False
                 except Exception as exc:
                     if is_browser_closed_error(exc):
                         await self._on_browser_closed()

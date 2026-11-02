@@ -694,7 +694,7 @@
     const note = worker.last_message || (guestReady(worker)
       ? "訪客資料已填妥並已儲存。可以撳「開始運作」或上面綠色「全部開始搶機」。"
       : "填妥個人同信用卡資料後，撳「儲存此 Worker」就可以開始運作。唔使登入 Apple ID。");
-    const sessionHint = `瀏覽器資料會放喺 sessions/${worker.session_dir || "session_guest_1"}。每次搶機前會先清購物袋，避免上次測試嘅貨一齊結帳。`;
+    const sessionHint = `瀏覽器資料會放喺 sessions/${worker.session_dir || "session_guest_1"}。開始運作、等貨嗰陣會先清購物袋；有貨加車就唔會再繞去購物袋。`;
     const meta = `${worker.sku || "未揀 SKU"} · 訪客 · ${fulfillment === "delivery" ? "送貨" : "自取"}`;
     return `
       <article class="worker-card${entering ? " enter" : ""}${sniping ? " is-sniping" : ""}${closed ? " is-closed" : ""}${collapsed ? " is-collapsed" : ""}" data-id="${esc(worker.id)}" data-status="${esc(status)}" data-message="${esc(worker.last_message || "")}" data-purchased="${esc(worker.purchased || 0)}" data-sniping="${sniping}" data-logged-in="${loggedIn}" data-checkout="${esc(checkoutMode)}" data-fulfillment="${esc(fulfillment)}">
@@ -774,7 +774,7 @@
           <label class="field full">
             <span>購買數量上限（此 Worker 全部門市合計）</span>
             <input class="qty" type="number" min="1" max="99" value="${esc(worker.max_qty)}" />
-            <p class="help">複選 ifc + 沙田、上限填 2：最多搶 2 部（例如購物袋一次揀 2，或分兩次）。唔係每間門市各 2 部。加車前會先清走購物袋舊貨。Apple 同一型號通常每人最多 2 部。</p>
+            <p class="help">複選 ifc + 沙田、上限填 2：最多搶 2 部（例如購物袋一次揀 2，或分兩次）。唔係每間門市各 2 部。等貨嗰陣會先清走購物袋舊貨。Apple 同一型號通常每人最多 2 部。</p>
           </label>
         </div>
         <div class="card-save">
