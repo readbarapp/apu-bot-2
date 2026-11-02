@@ -242,19 +242,31 @@
     return isMaskedCard(value) && cardDigits(value).length >= 4;
   }
 
+  function guestHasStoredCard(worker) {
+    return guestHasMaskedCard(worker?.guest) || guestHasMaskedCard(savedProfile(worker?.id)?.guest);
+  }
+
+  function guestCardStatusText(guest) {
+    if (guestHasMaskedCard(guest)) {
+      return `已儲存信用卡 ${String(guest.card_number).trim()}。欄位空白＝繼續用呢張卡，唔使再填 CVV。要換卡先至重新輸入 16 位同新 CVV。`;
+    }
+    return "未儲存信用卡。請填 16 位卡號同 CVV。";
+  }
+
   function guestMissing(worker) {
     const guest = { ...emptyGuest(), ...(worker.guest || {}) };
     if (!guest.address_street && guest.address) guest.address_street = guest.address;
-    const maskedCard = guestHasMaskedCard(guest);
+    const storedCard = guestHasStoredCard(worker);
+    const replacingCard = !isMaskedCard(guest.card_number) && cardDigits(guest.card_number).length === 16;
     return GUEST_FIELDS.filter(([key]) => {
       const value = String(guest[key] || "").trim();
       if (key === "card_number") {
-        if (maskedCard) return false;
+        if (guestHasMaskedCard(guest) || (storedCard && !value)) return false;
         return cardDigits(value).length !== 16;
       }
       if (key === "cvv") {
         const digits = cardDigits(value);
-        if (!value) return !maskedCard;
+        if (!value) return replacingCard || (!storedCard && !guestHasMaskedCard(guest));
         return digits.length < 3 || digits.length > 4;
       }
       return !value;
@@ -443,7 +455,15 @@
           address: card.querySelector(".guest-address-street")?.value.trim() || "",
           address_street: card.querySelector(".guest-address-street")?.value.trim() || "",
           address_building: card.querySelector(".guest-address-building")?.value.trim() || "",
-          card_number: card.querySelector(".guest-card")?.value.trim() || "",
+          card_number: (() => {
+            const typed = card.querySelector(".guest-card")?.value.trim() || "";
+            if (typed) return typed;
+            const previous = String((prev.guest || {}).card_number || "").trim();
+            const savedCard = String((savedProfile(card.dataset.id)?.guest || {}).card_number || "").trim();
+            if (guestHasMaskedCard({ card_number: previous })) return previous;
+            if (guestHasMaskedCard({ card_number: savedCard })) return savedCard;
+            return "";
+          })(),
           card_month: card.querySelector(".guest-month")?.value.trim() || "",
           card_year: card.querySelector(".guest-year")?.value.trim() || "",
           cvv: card.querySelector(".guest-cvv")?.value.trim() || "",
@@ -699,12 +719,13 @@
               <label class="field"><span>香港聯絡電話</span><input class="guest-phone" type="tel" autocomplete="off" value="${esc(guest.phone)}" /></label>
               <label class="field full"><span>街道地址（區域、地區、街道名稱及號碼）</span><input class="guest-address-street" type="text" autocomplete="off" value="${esc(guest.address_street || guest.address)}" placeholder="例如 中環金融街 8 號" /></label>
               <label class="field full"><span>屋苑或大廈／座數／樓層／單位</span><input class="guest-address-building" type="text" autocomplete="off" value="${esc(guest.address_building)}" placeholder="例如 國際金融中心一期 15 樓 1501 室" /></label>
-              <label class="field full"><span>信用卡號碼（16 個數字）</span><input class="guest-card" type="text" inputmode="numeric" maxlength="16" autocomplete="off" value="${esc(guest.card_number)}" /></label>
+              <label class="field full"><span>信用卡號碼（16 個數字）</span><input class="guest-card" type="text" inputmode="numeric" maxlength="16" autocomplete="off" value="${esc(guestHasMaskedCard(guest) ? "" : guest.card_number)}" placeholder="${guestHasMaskedCard(guest) ? "已儲存，留空即可" : ""}" /></label>
               <label class="field"><span>有效月份</span><select class="guest-month">${monthOptions(guest.card_month)}</select></label>
               <label class="field"><span>有效年份</span><select class="guest-year">${yearOptions(guest.card_year)}</select></label>
-              <label class="field"><span>CVV 安全碼</span><input class="guest-cvv" type="password" maxlength="4" autocomplete="off" value="${esc(guest.cvv)}" /></label>
+              <label class="field"><span>CVV 安全碼</span><input class="guest-cvv" type="password" maxlength="4" autocomplete="off" value="" placeholder="${guestHasMaskedCard(guest) ? "已儲存，留空即可" : ""}" /></label>
             </div>
-            <p class="help">第一次要填晒全部欄位先可以儲存。儲存後可以再改再存：卡號會變成 •••• 後四位，改姓名／地址唔使再填 CVV。要換卡先至要填新嘅 16 位卡號同 CVV。官網帳單地址有兩欄：第一欄填區域／地區／街道名稱及號碼，第二欄填屋苑或大廈／座數／樓層／單位。控制台年份顯示 2028，填入 Apple 官網時會轉成 MM/YY（例如 12/28），唔會填 12/2028。卡號同 CVV 只會加密寫入本機 secrets 資料夾。</p>
+            <p class="help guest-card-status">${esc(guestCardStatusText(guest))}</p>
+            <p class="help">第一次要填晒全部欄位先可以儲存。儲存後卡號同 CVV 欄會空白係正常（安全，唔會留喺畫面），上面會顯示已儲存 •••• 後四位，唔使再填就可以開始運作。打錯姓名／地址可以再改再存。要換卡先至要填新嘅 16 位卡號同 CVV。官網帳單地址有兩欄：第一欄填區域／地區／街道名稱及號碼，第二欄填屋苑或大廈／座數／樓層／單位。控制台年份顯示 2028，填入 Apple 官網時會轉成 MM/YY（例如 12/28），唔會填 12/2028。卡號同 CVV 只會加密寫入本機 secrets 資料夾。</p>
           </div>
           <div class="field full sku-block">
             <span>1. 目標機型（每個 Worker 只搶一個 SKU）</span>
@@ -811,6 +832,17 @@
           ? "已登入。可以撳「開始運作」或上面綠色「全部開始搶機」。"
           : "未登入。請先撳「登入 Apple ID」。"));
     }
+    const cardStatus = card.querySelector(".guest-card-status");
+    if (cardStatus) cardStatus.textContent = guestCardStatusText(worker.guest || {});
+    const cardInput = card.querySelector(".guest-card");
+    const cvvInput = card.querySelector(".guest-cvv");
+    if (cardInput && guestHasMaskedCard(worker.guest) && isMaskedCard(cardInput.value)) {
+      cardInput.value = "";
+      cardInput.placeholder = "已儲存，留空即可";
+    }
+    if (cvvInput && guestHasMaskedCard(worker.guest) && !cardDigits(cvvInput.value)) {
+      cvvInput.placeholder = "已儲存，留空即可";
+    }
     const meta = card.querySelector(".collapsed-meta");
     if (meta) {
       const guestBit = isGuestMode(worker)
@@ -910,7 +942,7 @@
     });
   }
 
-  function saveOne(id) {
+  async function saveOne(id) {
     const card = els.list.querySelector(`[data-id="${CSS.escape(id)}"]`);
     if (card && card.dataset.sniping === "true") {
       window.alert("呢個 Worker 運作中，設定已鎖定。請先「暫停運作」再改同儲存。");
@@ -951,6 +983,18 @@
     }
     const secretPayload = isGuestMode(worker) && !state.previewMode ? apiProfile(worker) : null;
     const guestResave = isGuestMode(worker) && Boolean(savedProfile(worker.id));
+    if (secretPayload) {
+      try {
+        await api("/api/workers/secrets", {
+          method: "POST",
+          body: JSON.stringify({ test_mode: els.testMode.checked, worker: secretPayload }),
+        });
+      } catch (err) {
+        appendLog({ ts: new Date().toISOString(), worker: worker.name, level: "error", message: err.message });
+        window.alert(`訪客信用卡儲存失敗：${err.message}`);
+        return false;
+      }
+    }
     const profile = profileOf(worker);
     const index = state.savedWorkers.findIndex((item) => item.id === worker.id);
     if (index >= 0) state.savedWorkers[index] = profile;
@@ -960,25 +1004,24 @@
     persistDraft();
     if (isGuestMode(worker)) {
       worker.guest = redactGuest(worker.guest);
+      persistDraft();
       if (card) {
         const cardInput = card.querySelector(".guest-card");
         const cvvInput = card.querySelector(".guest-cvv");
-        if (cardInput) cardInput.value = worker.guest.card_number;
-        if (cvvInput) cvvInput.value = "";
+        if (cardInput) {
+          cardInput.value = "";
+          cardInput.placeholder = "已儲存，留空即可";
+        }
+        if (cvvInput) {
+          cvvInput.value = "";
+          cvvInput.placeholder = "已儲存，留空即可";
+        }
       }
       worker.status = "ready";
-      worker.last_message = "訪客資料已填妥並已儲存。改錯可以再改再撳儲存。";
+      worker.last_message = "訪客資料已填妥並已儲存。卡號同 CVV 已加密存放，欄位空白都可以開始運作。";
     }
     updateSaveHint();
     patchWorkerStatus(worker);
-    if (secretPayload) {
-      api("/api/workers/secrets", {
-        method: "POST",
-        body: JSON.stringify({ test_mode: els.testMode.checked, worker: secretPayload }),
-      }).catch((err) => {
-        appendLog({ ts: new Date().toISOString(), worker: worker.name, level: "error", message: err.message });
-      });
-    }
     appendLog({
       ts: new Date().toISOString(),
       worker: worker.name,

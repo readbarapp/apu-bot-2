@@ -136,19 +136,11 @@ class WorkerProfile(BaseModel):
         else:
             if not self.session_dir:
                 self.session_dir = f"session_guest_{self.id}"
-            card = self.guest.card_number or ""
-            masked_card = "•" in card
             missing = []
             for key, label in GUEST_FIELD_LABELS.items():
                 value = getattr(self.guest, key) or ""
-                if key == "card_number":
-                    if not value:
-                        missing.append(label)
-                    continue
-                if key == "cvv":
-                    # Blank CVV is OK when the PAN is masked; hydrate fills it from secrets.
-                    if not value and not masked_card:
-                        missing.append(label)
+                if key in {"card_number", "cvv"}:
+                    # Blank or masked PAN/CVV is filled from local secrets in manager._hydrate.
                     continue
                 if not value:
                     missing.append(label)
