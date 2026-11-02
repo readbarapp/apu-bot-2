@@ -261,6 +261,19 @@ playwright install chromium
 
 用更新後嘅 `requirements.txt`（入面係 `uvicorn`，**冇** `[standard]`）。仍然失敗就唔好再裝 C++，先檢查係咪裝咗 32-bit 或 3.15。
 
+### `py app.py` 話 No module named 'tzdata' / No time zone found with key Asia/Hong_Kong？
+
+呢個係 **Windows 正常現象**，唔係你裝錯 Python。Windows 本身冇帶 IANA 時區表，程式要用 `Asia/Hong_Kong` 就要額外裝 `tzdata`。
+
+喺已經啟動 `.venv`（見到 `(.venv)`）嘅 PowerShell 跑：
+
+```powershell
+pip install tzdata
+py app.py
+```
+
+如果 `py` 唔得，用 `python app.py`。之後新嘅 `requirements.txt` 已包含 `tzdata`，重新 `pip install -r requirements.txt` 都會一併裝到。
+
 ### 如果一直冇補貨，程式會點？
 
 會**一直輪詢**，唔會因為「暫時冇貨」而自己停。
