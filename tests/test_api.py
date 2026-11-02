@@ -39,6 +39,8 @@ def test_index_and_frontend_assets(client) -> None:
     assert "FALLBACK_CATALOG" in js.text
     assert "STATUS_LABELS" in js.text
     assert "待命（已登入）" in js.text
+    assert "待命（已填妥資料）" in js.text
+    assert "尚未填妥訪客資料" in js.text
     assert "登入 Apple ID" in js.text
     assert "開始運作" in js.text
     assert "暫停運作" in js.text
@@ -79,8 +81,10 @@ def test_requirements_skip_packages_that_need_msvc_on_windows() -> None:
     assert "httptools" not in text
     assert "uvicorn>=" in text
     assert "websockets>=" in text
+    assert "tzdata" in text
     assert "Failed building wheel for pyyaml" in readme
     assert "唔使裝 Visual C++ Build Tools" in readme
+    assert "No time zone found with key Asia/Hong_Kong" in readme
 
 
 def test_custom_sku_can_be_removed_from_dropdown() -> None:

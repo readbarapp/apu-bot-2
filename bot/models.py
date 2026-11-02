@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -53,6 +54,16 @@ class GuestProfile(BaseModel):
     @classmethod
     def strip_guest(cls, value: str) -> str:
         return (value or "").strip()
+
+    @field_validator("card_number")
+    @classmethod
+    def sixteen_digit_card(cls, value: str) -> str:
+        if not value or "•" in value:
+            return value
+        digits = re.sub(r"\D", "", value)
+        if digits and len(digits) != 16:
+            raise ValueError("信用卡號碼必須係 16 個數字")
+        return digits
 
     def missing_labels(self) -> list[str]:
         missing: list[str] = []
