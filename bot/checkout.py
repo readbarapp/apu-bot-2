@@ -1207,13 +1207,68 @@ async def _pickup_stores_visible(page, timeout: int = 3500) -> bool:
 
 
 async def _pickup_stores_ready(page) -> bool:
+    """Non-blocking: empty list must return immediately so we can search."""
     try:
         handle = page.get_by_text(PICKUP_APPLIED_PATTERN).first
         if await _locator_is_visible(handle):
             return True
     except Exception:
         pass
-    return await _pickup_stores_visible(page, timeout=800)
+    try:
+        handle = page.get_by_text(PICKUP_STORE_LIST_PATTERN).first
+        return await _locator_is_visible(handle)
+    except Exception:
+        return False
+
+
+def _store_radio_locators(page, match: StockMatch) -> list:
+    store_pattern = re.compile(re.escape(match.store_name) + r"|" + re.escape(match.store_id), re.I)
+    return [
+        page.locator(f'input[type="radio"][value="{match.store_id}"]'),
+        page.locator(f'input[value="{match.store_id}"]'),
+        page.locator(f'[data-autom*="{match.store_id}" i]'),
+        page.locator(f'[data-store-id="{match.store_id}"]'),
+        page.get_by_role("radio", name=store_pattern),
+        page.locator("label").filter(has_text=store_pattern),
+        page.get_by_text(store_pattern),
+    ]
+
+
+async def _store_radio_available(page, match: StockMatch) -> bool:
+    for locator in _store_radio_locators(page, match):
+        try:
+            n = await _locator_count(locator)
+            if n == 0:
+                continue
+            handle = locator.first
+            if await _locator_is_visible(handle):
+                return True
+            if n is None:
+                continue
+            return True
+        except Exception:
+            continue
+    return False
+
+
+async def _wait_for_store_radio(page, match: StockMatch, timeout: int = 700) -> bool:
+    deadline = asyncio.get_running_loop().time() + max(timeout / 1000, 0.05)
+    while asyncio.get_running_loop().time() < deadline:
+        if await _store_radio_available(page, match):
+            return True
+        await asyncio.sleep(0.12)
+    return False
+
+
+def _pickup_search_queries(match: StockMatch) -> list[str]:
+    """Prefer the store area Apple's field asks for (中環), not a full Hong Kong list."""
+    info = STORE_BY_ID.get(match.store_id) or {}
+    queries: list[str] = []
+    for item in (info.get("area"), match.store_name, PICKUP_LOCATION):
+        text = str(item or "").strip()
+        if text and text not in queries:
+            queries.append(text)
+    return queries
 
 
 async def _is_checked(handle) -> bool:
@@ -1297,10 +1352,15 @@ async def _wait_store_committed(page, match: StockMatch, timeout: int = 2500) ->
 
 
 async def _apply_pickup_location(
-    page, query: str = PICKUP_LOCATION, timeout: int = 12_000
+    page,
+    query: str = PICKUP_LOCATION,
+    timeout: int = 12_000,
+    match: StockMatch | None = None,
 ) -> bool:
-    """Apple HK hides pickup stores until a district is applied. Hong Kong lists all six."""
+    """Fill the district search. Prefer the target store radio over waiting for all six stores."""
     await _wait_for_pickup_location_ui(page, timeout=min(timeout, 8000))
+    if match and await _store_radio_available(page, match):
+        return True
     if await _pickup_stores_ready(page):
         return True
     deadline = asyncio.get_running_loop().time() + max(timeout / 1000, 0.05)
@@ -1319,12 +1379,18 @@ async def _apply_pickup_location(
             filled = await _type_into_district_label(page, query)
         if filled:
             await _click_pickup_apply(page)
-            if await _pickup_stores_visible(page, timeout=3500):
+            if match and await _wait_for_store_radio(page, match, timeout=2000):
+                hub.info("checkout", f"已填「{query}」並撳套用，已見到 {match.store_name}")
+                return True
+            if await _pickup_stores_visible(page, timeout=2000 if match else 3500):
                 hub.info("checkout", f"已填「{query}」並撳套用")
                 return True
             if not await _pickup_location_error_visible(page):
-                await asyncio.sleep(0.6)
-                if await _pickup_stores_visible(page, timeout=2000):
+                await asyncio.sleep(0.4)
+                if match and await _store_radio_available(page, match):
+                    hub.info("checkout", f"已填「{query}」並撳套用，已見到 {match.store_name}")
+                    return True
+                if await _pickup_stores_visible(page, timeout=1500):
                     hub.info("checkout", f"已填「{query}」並撳套用")
                     return True
         await asyncio.sleep(0.25)
@@ -1336,16 +1402,7 @@ async def _apply_pickup_location(
 
 
 async def _click_pickup_store(page, match: StockMatch, timeout: int = 4000) -> bool:
-    store_pattern = re.compile(re.escape(match.store_name) + r"|" + re.escape(match.store_id), re.I)
-    candidates = [
-        page.locator(f'input[type="radio"][value="{match.store_id}"]'),
-        page.locator(f'input[value="{match.store_id}"]'),
-        page.locator(f'[data-autom*="{match.store_id}" i]'),
-        page.locator(f'[data-store-id="{match.store_id}"]'),
-        page.get_by_role("radio", name=store_pattern),
-        page.locator("label").filter(has_text=store_pattern),
-        page.get_by_text(store_pattern),
-    ]
+    candidates = _store_radio_locators(page, match)
     for locator in candidates:
         try:
             n = await _locator_count(locator)
@@ -1365,37 +1422,30 @@ async def _click_pickup_store(page, match: StockMatch, timeout: int = 4000) -> b
 async def _select_pickup_store(
     page, match: StockMatch, timeout: int, timer: StepTimer | None = None
 ) -> bool:
-    if not await _pickup_already_active(page):
+    if not await _store_radio_available(page, match) and not await _pickup_already_active(page):
         await _click_choice(page, PICKUP_PATTERN, timeout=timeout)
         if timer:
             timer.mark("fulfillment")
-    if not await _pickup_stores_ready(page):
-        await _apply_pickup_location(page, PICKUP_LOCATION)
+    if await _wait_for_store_radio(page, match, timeout=700):
+        if await _click_pickup_store(page, match, timeout=max(timeout, 1500)):
+            if timer:
+                timer.mark("pickup_store")
+            return True
+    for query in _pickup_search_queries(match):
+        if await _store_radio_available(page, match):
+            break
+        hub.info("checkout", f"未見到 {match.store_name} radio，改填「{query}」")
+        await _apply_pickup_location(page, query, timeout=min(timeout * 2, 8000), match=match)
         if timer:
             timer.mark("pickup_search")
-    if await _click_pickup_store(page, match, timeout=max(timeout, 2000)):
-        if timer:
-            timer.mark("pickup_store")
-        return True
-    if not await _pickup_stores_ready(page):
-        area = (STORE_BY_ID.get(match.store_id) or {}).get("area") or ""
-        for query in (area, match.store_name):
-            if not query:
-                continue
-            await _apply_pickup_location(page, query)
-            if timer:
-                timer.mark("pickup_search")
-            if await _click_pickup_store(page, match):
-                if timer:
-                    timer.mark("pickup_store")
-                return True
-    else:
-        hub.info("checkout", "門市清單已喺，唔會再填 Hong Kong，只再撳指定店")
-        await asyncio.sleep(0.35)
         if await _click_pickup_store(page, match, timeout=1500):
             if timer:
                 timer.mark("pickup_store")
             return True
+    if await _click_pickup_store(page, match, timeout=1500):
+        if timer:
+            timer.mark("pickup_store")
+        return True
     hub.warn("checkout", f"未能自動點選門市 {match.store_name}，將繼續嘗試結帳步驟")
     return False
 

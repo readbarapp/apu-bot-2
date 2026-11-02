@@ -29,6 +29,7 @@ from bot.checkout import (
     _continue_as_guest,
     PICKUP_DETAILS_CONTINUE_PATTERN,
     _apply_pickup_location,
+    _pickup_search_queries,
     _click_earliest_slot,
     _empty_bag,
     _handle_fulfillment,
@@ -1028,12 +1029,25 @@ class _FakeFulfillHandle:
         return "input"
 
 
+def test_pickup_search_queries_prefer_area_over_hong_kong() -> None:
+    assert _pickup_search_queries(IFC_MATCH) == ["中環", "ifc mall", "Hong Kong"]
+
+
 @pytest.mark.asyncio
 async def test_select_pickup_store_does_not_reclick_pickup_when_list_visible() -> None:
     page = _FakeFulfillmentPage(stores_listed=True)
     assert await _select_pickup_store(page, IFC_MATCH, timeout=1500) is True
     assert page.pickup_clicks == 0
     assert page.filled == []
+    assert page.store_checked == "R428"
+
+
+@pytest.mark.asyncio
+async def test_select_pickup_store_searches_area_before_hong_kong() -> None:
+    page = _FakeFulfillmentPage(stores_listed=False)
+    assert await _select_pickup_store(page, IFC_MATCH, timeout=1500) is True
+    assert page.filled[0] == "中環"
+    assert "Hong Kong" not in page.filled
     assert page.store_checked == "R428"
 
 
@@ -1546,6 +1560,8 @@ def test_frontend_exposes_checkout_and_fulfillment_controls() -> None:
     assert "我會前來取貨" in readme
     assert "Hong Kong" in readme
     assert "套用" in readme
+    assert "該店地區" in readme
+    assert "store radio" in readme.lower() or "Store ID" in readme
     assert "自動收合" in readme
     assert "我希望送貨" in readme
     assert "Shipping-init" in readme
