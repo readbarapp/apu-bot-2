@@ -904,6 +904,20 @@ async def _apply_fill(handle, values: list[str]) -> bool:
     return True
 
 
+async def _visible_fill_handle(locator, timeout: int = 400):
+    n = await _locator_count(locator)
+    if n == 0:
+        return None
+    handle = locator.first
+    if await _locator_is_visible(handle):
+        return handle
+    try:
+        await handle.wait_for(state="visible", timeout=timeout)
+        return handle
+    except Exception:
+        return None
+
+
 async def _fill_phone(page, phone: str) -> bool:
     value = hk_phone_number(phone)
     if not value:
@@ -919,19 +933,23 @@ async def _fill_phone(page, phone: str) -> bool:
         page.get_by_label(re.compile(r"手提電話號碼|^手提電話$")),
         page.get_by_placeholder(re.compile(r"手提電話號碼|^手提電話$")),
     ]
-    for locator in locators:
-        try:
-            handle = locator.first
-            await handle.wait_for(state="visible", timeout=1800)
-            if await _apply_fill(handle, [value]):
-                return True
-        except Exception:
-            continue
+    deadline = asyncio.get_running_loop().time() + 2.5
+    while asyncio.get_running_loop().time() < deadline:
+        for locator in locators:
+            try:
+                handle = await _visible_fill_handle(locator, timeout=250)
+                if handle is None:
+                    continue
+                if await _apply_fill(handle, [value]):
+                    return True
+            except Exception:
+                continue
+        await asyncio.sleep(0.12)
     hub.warn("checkout", "未能填入手提電話")
     return False
 
 
-async def _fill_labeled(page, patterns: list[str], value: str | list[str]) -> bool:
+async def _fill_labeled(page, patterns: list[str], value: str | list[str], timeout: int = 400) -> bool:
     values = _fill_values(value)
     if not values:
         return False
@@ -943,12 +961,9 @@ async def _fill_labeled(page, patterns: list[str], value: str | list[str]) -> bo
     ]
     for locator in locators:
         try:
-            n = await _locator_count(locator)
-            if n == 0:
+            handle = await _visible_fill_handle(locator, timeout=timeout)
+            if handle is None:
                 continue
-            handle = locator.first
-            if not await _locator_is_visible(handle):
-                await handle.wait_for(state="visible", timeout=1200)
             if await _apply_fill(handle, values):
                 return True
         except Exception:
@@ -966,8 +981,9 @@ async def _fill_combined_expiry(page, combined: str) -> bool:
     ]
     for locator in locators:
         try:
-            handle = locator.first
-            await handle.wait_for(state="visible", timeout=1200)
+            handle = await _visible_fill_handle(locator, timeout=400)
+            if handle is None:
+                continue
             await handle.fill(combined, timeout=2000)
             return True
         except Exception:
@@ -983,9 +999,29 @@ async def _fill_card_expiry(page, month: str, year: str) -> None:
     await _fill_labeled(page, FIELD_CANDIDATES["card_year"], card_year_options(year))
 
 
+async def _wait_for_labeled(page, patterns: list[str], timeout: int = 3000) -> bool:
+    deadline = asyncio.get_running_loop().time() + max(timeout / 1000, 0.05)
+    joined = re.compile("|".join(patterns), re.I)
+    while asyncio.get_running_loop().time() < deadline:
+        for locator in (page.get_by_label(joined), page.get_by_placeholder(joined)):
+            try:
+                if await _visible_fill_handle(locator, timeout=200) is not None:
+                    return True
+            except Exception:
+                continue
+        await asyncio.sleep(0.1)
+    return False
+
+
 async def _fill_contact(page, guest: GuestProfile | None) -> None:
     if guest is None:
         return
+    if checkout_stage(getattr(page, "url", "") or "") == "contact":
+        await _wait_for_labeled(
+            page,
+            FIELD_CANDIDATES["last_name"] + FIELD_CANDIDATES["first_name"],
+            timeout=3000,
+        )
     mapping = {
         "last_name": guest.last_name,
         "first_name": guest.first_name,
@@ -1027,28 +1063,103 @@ async def _fill_address(page, guest: GuestProfile | None) -> None:
     await _fill_labeled(page, FIELD_CANDIDATES["address_building"], guest.address_building)
 
 
-async def _choose_credit_card(page) -> None:
-    locators = [
-        page.get_by_role("button", name=CREDIT_CARD_PATTERN),
-        page.get_by_role("radio", name=CREDIT_CARD_PATTERN),
-        page.get_by_label(CREDIT_CARD_PATTERN),
-        page.get_by_text(CREDIT_CARD_PATTERN),
-        page.locator('[data-autom*="credit" i], [data-autom*="card" i]'),
-    ]
-    for locator in locators:
+def _credit_card_locators(page) -> list:
+    """Payment-method control only. Do not match card-number inputs via *card* autom."""
+    locators = []
+    factories = (
+        lambda: page.get_by_role("button", name=CREDIT_CARD_PATTERN),
+        lambda: page.get_by_role("radio", name=CREDIT_CARD_PATTERN),
+        lambda: page.get_by_label(CREDIT_CARD_PATTERN),
+        lambda: page.locator("label").filter(has_text=CREDIT_CARD_PATTERN),
+        lambda: page.locator(
+            '[data-autom*="creditcard" i], [data-autom*="credit-card" i], '
+            '[data-autom*="creditCard" i], [data-autom*="credit_card" i], '
+            '[data-autom*="paymentMethod" i][data-autom*="credit" i]'
+        ),
+        lambda: page.get_by_role("link", name=CREDIT_CARD_PATTERN),
+        lambda: page.get_by_text(CREDIT_CARD_PATTERN),
+    )
+    for factory in factories:
         try:
-            if await locator.count() == 0:
-                continue
-            await locator.first.click(timeout=2500)
-            return
+            locators.append(factory())
         except Exception:
             continue
+    return locators
 
 
-async def _fill_billing(page, guest: GuestProfile | None) -> None:
+def _card_number_locators(page) -> list:
+    joined = re.compile("|".join(FIELD_CANDIDATES["card_number"]), re.I)
+    return [
+        page.get_by_label(joined),
+        page.get_by_placeholder(joined),
+        page.locator(
+            'input[name*="cardNumber" i], input[autocomplete="cc-number"], '
+            'input[data-autom*="cardNumber" i], input[data-autom*="card-number" i]'
+        ),
+    ]
+
+
+async def _card_fields_ready(page) -> bool:
+    for locator in _card_number_locators(page):
+        try:
+            handle = await _visible_fill_handle(locator, timeout=200)
+            if handle is not None:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _click_credit_card_control(page) -> bool:
+    for locator in _credit_card_locators(page):
+        try:
+            n = await _locator_count(locator)
+            if n == 0:
+                continue
+            handle = locator.first
+            if not await _locator_is_visible(handle):
+                continue
+            try:
+                await handle.scroll_into_view_if_needed(timeout=400)
+            except Exception:
+                pass
+            await handle.click(timeout=800)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+async def _choose_credit_card(page, timeout: int | None = None) -> bool:
+    """Click 信用卡或扣帳卡 as soon as it is visible, then wait for the card-number field."""
+    stage = checkout_stage(getattr(page, "url", "") or "")
+    if timeout is None:
+        timeout = 6000 if stage == "billing" else 400
+    deadline = asyncio.get_running_loop().time() + max(timeout / 1000, 0.05)
+    clicked = False
+    last_click = 0.0
+    while asyncio.get_running_loop().time() < deadline:
+        now = asyncio.get_running_loop().time()
+        should_click = not clicked or now - last_click >= 0.7
+        if should_click and await _click_credit_card_control(page):
+            if not clicked:
+                hub.info("checkout", "已撳「信用卡或扣帳卡」")
+            clicked = True
+            last_click = now
+        if await _card_fields_ready(page):
+            return True
+        await asyncio.sleep(0.1)
+    if clicked:
+        hub.warn("checkout", "已撳「信用卡或扣帳卡」，但卡號欄未出現")
+        return True
+    hub.warn("checkout", "未撳到「信用卡或扣帳卡」")
+    return False
+
+
+async def _fill_billing(page, guest: GuestProfile | None, *, payment_timeout: int | None = None) -> None:
     if guest is None:
         return
-    await _choose_credit_card(page)
+    await _choose_credit_card(page, timeout=payment_timeout)
     await _fill_labeled(page, FIELD_CANDIDATES["card_number"], guest.card_number)
     await _fill_card_expiry(page, guest.card_month, guest.card_year)
     await _fill_labeled(page, FIELD_CANDIDATES["cvv"], guest.cvv)
@@ -1060,7 +1171,7 @@ async def _fill_billing(page, guest: GuestProfile | None) -> None:
 
 async def _fill_guest(page, guest: GuestProfile | None) -> None:
     await _fill_contact(page, guest)
-    await _fill_billing(page, guest)
+    await _fill_billing(page, guest, payment_timeout=400)
 
 
 async def _wait_for_pickup_location_ui(page, timeout: int = 8000) -> None:
@@ -1386,11 +1497,11 @@ async def _apply_pickup_location(
                 hub.info("checkout", f"已填「{query}」並撳套用")
                 return True
             if not await _pickup_location_error_visible(page):
-                await asyncio.sleep(0.4)
+                await asyncio.sleep(0.35)
                 if match and await _store_radio_available(page, match):
                     hub.info("checkout", f"已填「{query}」並撳套用，已見到 {match.store_name}")
                     return True
-                if await _pickup_stores_visible(page, timeout=1500):
+                if await _pickup_stores_visible(page, timeout=1200):
                     hub.info("checkout", f"已填「{query}」並撳套用")
                     return True
         await asyncio.sleep(0.25)
@@ -1410,13 +1521,13 @@ async def _click_pickup_store(page, match: StockMatch, timeout: int = 4000) -> b
                 continue
             handle = locator.first
             if not await _locator_is_visible(handle):
-                await handle.wait_for(state="visible", timeout=min(timeout, 800))
-            await handle.click(timeout=2500)
-            if await _wait_store_committed(page, match, timeout=2000):
+                continue
+            await handle.click(timeout=900)
+            if await _wait_store_committed(page, match, timeout=1200):
                 return True
         except Exception:
             continue
-    return await _wait_store_committed(page, match, timeout=800)
+    return await _wait_store_committed(page, match, timeout=500)
 
 
 async def _select_pickup_store(
@@ -1450,8 +1561,8 @@ async def _select_pickup_store(
     return False
 
 
-async def _click_pickup_details_continue(page, timeout: int = 10_000) -> bool:
-    """Wait until Apple enables 繼續前往取貨詳情 after the store radio commits."""
+async def _click_pickup_details_continue(page, timeout: int = 4500) -> bool:
+    """Click 繼續前往取貨詳情 as soon as it is on screen; do not idle 10s for enabled."""
     deadline = asyncio.get_running_loop().time() + max(timeout / 1000, 0.05)
     while asyncio.get_running_loop().time() < deadline:
         if checkout_stage(getattr(page, "url", "") or "") == "contact":
@@ -1468,27 +1579,43 @@ async def _click_pickup_details_continue(page, timeout: int = 10_000) -> bool:
         ]
         for locator in locators:
             try:
+                n = await _locator_count(locator)
+                if n == 0:
+                    continue
                 handle = locator.first
                 if not await _locator_is_visible(handle):
                     continue
+                enabled = True
                 try:
-                    if await handle.is_enabled() is False:
-                        continue
+                    enabled = await handle.is_enabled() is not False
                 except Exception:
-                    pass
-                await handle.click(timeout=2500)
+                    enabled = True
+                try:
+                    if enabled:
+                        await handle.click(timeout=800)
+                    else:
+                        await handle.click(timeout=400, force=True)
+                except Exception:
+                    if enabled:
+                        continue
+                    try:
+                        await handle.click(timeout=400)
+                    except Exception:
+                        continue
+                if checkout_stage(getattr(page, "url", "") or "") == "contact":
+                    return True
                 try:
                     await page.wait_for_url(
                         re.compile(r"PickupContact|timeSlot|Timeslot", re.I),
-                        timeout=4000,
+                        timeout=1500,
                     )
                 except Exception:
-                    await asyncio.sleep(0.35)
+                    await asyncio.sleep(0.12)
                 if checkout_stage(getattr(page, "url", "") or "") == "contact":
                     return True
             except Exception:
                 continue
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.12)
     return checkout_stage(getattr(page, "url", "") or "") == "contact"
 
 
@@ -1586,7 +1713,7 @@ async def _handle_fulfillment(
             return RETRY_FULFILLMENT
     if checkout_stage(page.url) == "contact":
         return None
-    if not await _click_pickup_details_continue(page, timeout=10_000):
+    if not await _click_pickup_details_continue(page, timeout=4500):
         if checkout_stage(page.url) == "contact":
             if timer:
                 timer.mark("pickup_continue")
@@ -1596,7 +1723,7 @@ async def _handle_fulfillment(
                 "checkout",
                 "已揀門市，繼續掣未跳頁。再等一次，唔會重填 Hong Kong、亦唔會再撳「我會前來取貨」。",
             )
-            await _click_pickup_details_continue(page, timeout=8000)
+            await _click_pickup_details_continue(page, timeout=2500)
             if timer:
                 timer.mark("pickup_continue")
             if checkout_stage(page.url) == "contact":
@@ -1806,15 +1933,15 @@ async def run_checkout(
                 await _fill_billing(page, guest)
                 billing_done = True
                 timer.mark("billing")
-                await _maybe_click(page, REVIEW_ORDER_PATTERN, timeout=4000)
-                if await _on_place_order_step(page):
-                    timer.mark("review")
-                    break
                 if test_mode:
                     hub.info(
                         worker_name,
-                        "測試模式：已填信用卡。檢查訂單掣未出現或未跳頁（測試卡多數停呢度），唔會再空等。",
+                        "測試模式：已填晒信用卡／帳單資料，暫停計時。唔會再等「檢查你的訂單」。",
                     )
+                    break
+                await _maybe_click(page, REVIEW_ORDER_PATTERN, timeout=4000)
+                if await _on_place_order_step(page):
+                    timer.mark("review")
                     break
                 continue
             await asyncio.sleep(0.35)
